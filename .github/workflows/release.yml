@@ -1,13 +1,27 @@
-name: Build Packages
+name: Build IPK Packages
 
+# Only OpenWrt 24.10 (opkg / .ipk) is built here.
+# SNAPSHOT uses the apk format, so it is intentionally not part of this workflow.
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
-      - v*
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipk-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
-  PACKAGE_DIRS: "ddns-go luci-app-ddns-go"
+  SDK: openwrt-24.10
+  FEEDNAME: packages_ci
+  PACKAGES: luci-app-ddns-go
+
 jobs:
   get-version:
     runs-on: ubuntu-latest
@@ -20,81 +34,23 @@ jobs:
 
       - name: Get version
         id: version
+        shell: bash
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
             VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
-  scan-packages:
-    runs-on: ubuntu-latest
-    outputs:
-      packages: ${{ steps.scan.outputs.packages }}
-      package-list: ${{ steps.scan.outputs.package-list }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install jq
-        run: sudo apt-get install -y jq
-
-      - name: Scan package directories
-        id: scan
-        run: |
-          PACKAGES_JSON="[]"
-          PACKAGE_LIST=""
-          
-          for dir in ${{ env.PACKAGE_DIRS }}; do
-            if [ -d "$dir" ] && [ -f "$dir/Makefile" ]; then
-              PKG_NAME=$(grep "^PKG_NAME" "$dir/Makefile" | head -1 | cut -d'=' -f2 | tr -d '[:space:]' || echo "")
-              PKG_VERSION=$(grep "^PKG_VERSION" "$dir/Makefile" | head -1 | cut -d'=' -f2 | tr -d '[:space:]' || echo "")
-              PKG_TITLE=$(grep "TITLE:=" "$dir/Makefile" | head -1 | cut -d':=' -f2 | sed 's/^[ \t]*//;s/[ \t]*$//' || echo "")
-              
-              if [ -z "$PKG_NAME" ]; then
-                PKG_NAME="$dir"
-              fi
-              
-              PACKAGES_JSON=$(echo "$PACKAGES_JSON" | jq -c \
-                --arg name "$PKG_NAME" \
-                --arg version "$PKG_VERSION" \
-                --arg dir "$dir" \
-                --arg title "$PKG_TITLE" \
-                '. + [{"name": $name, "version": $version, "dir": $dir, "title": $title}]')
-              
-              if [ -z "$PACKAGE_LIST" ]; then
-                PACKAGE_LIST="$PKG_NAME"
-              else
-                PACKAGE_LIST="$PACKAGE_LIST $PKG_NAME"
-              fi
-              
-              echo "Found package: $PKG_NAME (version: $PKG_VERSION) in $dir"
-            else
-              echo "Warning: $dir is not a valid package directory"
-            fi
-          done
-          
-          {
-            echo "packages<<EOF"
-            echo "$PACKAGES_JSON"
-            echo "EOF"
-            echo "package-list=$PACKAGE_LIST"
-          } >> $GITHUB_OUTPUT
-          
-          echo "Found packages: $PACKAGE_LIST"
-          echo "JSON output: $PACKAGES_JSON"
   build:
-    name: Build ${{ matrix.arch }}-${{ matrix.sdk }}
-    needs: [get-version, scan-packages]
+    name: ipk / ${{ matrix.arch }}
+    needs: get-version
     runs-on: ubuntu-latest
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        pkg: ${{ fromJson(needs.scan-packages.outputs.packages).*.name }}
         arch:
           - aarch64_cortex-a53
           - aarch64_cortex-a72
@@ -106,129 +62,194 @@ jobs:
           - mipsel_24kc
           - riscv64_riscv64
           - x86_64
-        sdk:
-          - openwrt-24.10
-          - SNAPSHOT
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Build packages
+      - name: Build with OpenWrt 24.10 SDK
         uses: sirpdboy/gh-action-sdk@go1.26
         env:
-          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
-          FEEDNAME: packages_ci
-          PACKAGES: luci-app-ddns-go
-          NO_REFRESH_CHECK: true
+          ARCH: ${{ matrix.arch }}-${{ env.SDK }}
+          FEEDNAME: ${{ env.FEEDNAME }}
+          PACKAGES: ${{ env.PACKAGES }}
+          NO_REFRESH_CHECK: 'true'
 
-      - name: Upload artifacts
+      - name: Collect .ipk files and create tar.gz
+        id: pack
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          SDK: ${{ env.SDK }}
+        run: |
+          set -euo pipefail
+
+          echo "=== Files produced by the SDK ==="
+          find bin/packages -type f -print | sort || true
+
+          mkdir -p ipk-out
+          # Prefer this architecture's own directory so packages built for a
+          # different target can never leak into this archive. The riscv64 SDK
+          # writes to riscv64_generic instead of riscv64_riscv64, so fall back
+          # to the whole tree only when the expected directory has no .ipk.
+          PKG_ROOT="bin/packages/$ARCH"
+          if [ ! -d "$PKG_ROOT" ] || \
+             ! find "$PKG_ROOT" -type f -name '*ddns-go*.ipk' -print -quit | grep -q .; then
+            echo "::warning::$PKG_ROOT has no .ipk, falling back to bin/packages"
+            PKG_ROOT="bin/packages"
+          fi
+          echo "Collecting from: $PKG_ROOT"
+
+          # Only this project's .ipk packages are kept.
+          while IFS= read -r -d '' f; do
+            cp -f "$f" ipk-out/
+          done < <(find "$PKG_ROOT" -type f -name '*ddns-go*.ipk' -print0)
+
+          # Hard guarantee: the archive can only ever contain .ipk files.
+          find ipk-out -type f ! -name '*.ipk' -delete
+
+          COUNT=$(find ipk-out -maxdepth 1 -type f -name '*.ipk' | wc -l)
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::No .ipk files were produced for $ARCH"
+            exit 1
+          fi
+
+          APK_COUNT=$(find bin/packages -type f -name '*.apk' | wc -l)
+          echo "APK files produced by SDK (intentionally discarded): $APK_COUNT"
+          echo "=== Collected .ipk files ($COUNT) ==="
+          ls -lh ipk-out
+          sha256sum ipk-out/*.ipk
+
+          ARCHIVE="${SDK}-${ARCH}.tar.gz"
+          tar -zcvf "$ARCHIVE" -C ipk-out .
+          echo "=== Archive contents ==="
+          tar -tzf "$ARCHIVE"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .ipk files
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.arch }}-${{ matrix.sdk }}
-          path: |
-            bin/packages/${{ matrix.arch }}/packages_ci/*.apk
-            bin/packages/riscv64_generic/packages_ci/*.apk
-            bin/packages/${{ matrix.arch }}/packages_ci/*.ipk
-      - name: Create release archive
+          name: ipk-${{ env.SDK }}-${{ matrix.arch }}
+          path: ipk-out/*.ipk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ env.SDK }}-${{ matrix.arch }}
+          path: ${{ steps.pack.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish Release
+    needs: [get-version, build]
+    # A single upload job avoids the previous race where every matrix job
+    # replaced the release assets of all the others.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release payload
+        shell: bash
         run: |
-          if [ "${{ matrix.arch }}" = "riscv64_riscv64" ] && [ "${{ matrix.sdk }}" = "SNAPSHOT" ]; then
-            tar -zcvf ${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz -C bin/packages/riscv64_generic/ packages_ci
-          else
-            tar -zcvf ${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz -C bin/packages/${{ matrix.arch }}/ packages_ci
-          fi
+          set -euo pipefail
+          ARCHIVES=$(find dist -type f -name '*.tar.gz' | wc -l)
+          OTHERS=$(find dist -type f ! -name '*.tar.gz' | wc -l)
+          echo "tar.gz archives: $ARCHIVES, other files: $OTHERS"
+          test "$ARCHIVES" -gt 0
+          test "$OTHERS" -eq 0
+          for f in dist/*.tar.gz; do
+            echo "--- $f"
+            tar -tzf "$f"
+            BAD=$(tar -tzf "$f" | grep -v '/$' | grep -v '\.ipk$' || true)
+            if [ -n "$BAD" ]; then
+              echo "::error::$f contains non-ipk files: $BAD"
+              exit 1
+            fi
+          done
 
       - name: Generate release notes
         id: release_notes
+        shell: bash
         env:
           VERSION: ${{ needs.get-version.outputs.version }}
-          PACKAGE_LIST: ${{ needs.scan-packages.outputs.package-list }}
         run: |
-          cat > release-notes.md << 'EOF'
-          # 🚀 OpenWRT Packages ${{ needs.get-version.outputs.version }}
+          set -euo pipefail
+          {
+            echo "# OpenWrt IPK Packages $VERSION"
+            echo
+            echo "- SDK: OpenWrt 24.10 (opkg / \`.ipk\` only)"
+            echo "- Every archive contains \`.ipk\` files only: no \`.apk\`, no firmware images."
+            echo
+            echo "## Package Overview"
+            echo
+            echo "| Package | Version |"
+            echo "|---------|---------|"
+            for dir in ddns-go luci-app-ddns-go; do
+              name=$(grep -m1 '^PKG_NAME' "$dir/Makefile" | cut -d'=' -f2 | tr -d '[:space:]')
+              ver=$(grep -m1 '^PKG_VERSION' "$dir/Makefile" | cut -d'=' -f2 | tr -d '[:space:]')
+              rel=$(grep -m1 '^PKG_RELEASE' "$dir/Makefile" | cut -d'=' -f2 | tr -d '[:space:]')
+              echo "| \`$name\` | \`$ver-$rel\` |"
+            done
+            echo
+            echo "## Archives (one per architecture)"
+            echo
+            for f in dist/*.tar.gz; do
+              echo "- \`$(basename "$f")\`"
+            done
+            echo
+            echo "## Changelog"
+            echo
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+            if [ -n "$PREV_TAG" ]; then
+              echo "Changes since $PREV_TAG:"
+              echo
+              git log --pretty=format:'- %s (%h)' "$PREV_TAG"..HEAD || true
+            else
+              git log --pretty=format:'- %s (%h)' -10 || true
+            fi
+            echo
+            echo
+            echo "## Notes"
+            echo
+            echo "- Pick the archive matching your router's architecture."
+            echo "- Install with \`opkg install *.ipk\` (OpenWrt 24.10)."
+            echo
+            echo "## Credits"
+            echo
+            echo "- [jeessy2](https://github.com/jeessy2/ddns-go) - Original ddns-go project"
+            echo "- [sirpdboy](https://github.com/sirpdboy) - OpenWRT package maintainer"
+          } > release-notes.md
 
-          - [ OPENWRT 24.10 ] is an IPK package.
-          - [ SNAPSHOT ] is an APK package.
-
-          ## 📦 Package Overview
-          EOF
-          echo "" >> release-notes.md
-          echo "| Package | Version | Description |" >> release-notes.md
-          echo "|---------|---------|-------------|" >> release-notes.md
-          
-          PACKAGES_JSON='${{ needs.scan-packages.outputs.packages }}'
-          echo "$PACKAGES_JSON" | jq -c '.[]' | while read -r pkg; do
-            PKG_NAME=$(echo "$pkg" | jq -r '.name')
-            PKG_VERSION=$(echo "$pkg" | jq -r '.version')
-            PKG_TITLE=$(echo "$pkg" | jq -r '.title')
-            echo "| \`$PKG_NAME\` | \`${PKG_VERSION:-$VERSION}\` | $PKG_TITLE |" >> release-notes.md
-          done
-          
-          echo "" >> release-notes.md
-
-          echo "## 🏗️ Supported Architectures" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "This release includes packages for the following architectures:" >> release-notes.md
-          echo "" >> release-notes.md
-          echo '```' >> release-notes.md
-          echo "aarch64_cortex-a53    # ARMv8 64-bit (Cortex-A53)" >> release-notes.md
-          echo "aarch64_cortex-a72    # ARMv8 64-bit (Cortex-A72)" >> release-notes.md
-          echo "aarch64_cortex-a76    # ARMv8 64-bit (Cortex-A76)" >> release-notes.md
-          echo "aarch64_generic       # ARMv8 64-bit (Generic)" >> release-notes.md
-          echo "arm_cortex-a7         # ARMv7 32-bit (Cortex-A7)" >> release-notes.md
-          echo "arm_cortex-a9         # ARMv7 32-bit (Cortex-A9)" >> release-notes.md
-          echo "mips_24kc             # MIPS 32-bit (24Kc)" >> release-notes.md
-          echo "mipsel_24kc           # MIPSEL 32-bit (24Kc)" >> release-notes.md
-          echo "riscv64_riscv64       # RISC-V 64-bit" >> release-notes.md
-          echo "x86_64                # x86-64 64-bit" >> release-notes.md
-          echo '```' >> release-notes.md
-          echo "" >> release-notes.md
-          
-          echo "" >> release-notes.md
-          echo "## 📋 Changelog" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "### What's Changed in this release:" >> release-notes.md
-          echo "" >> release-notes.md
-
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            echo "Changes since $PREV_TAG:" >> release-notes.md
-            echo "" >> release-notes.md
-            git log --pretty=format:"- %s (%h)" $PREV_TAG..HEAD | grep -v "Merge" >> release-notes.md
-          else
-            git log --pretty=format:"- %s (%h)" -10 >> release-notes.md
-          fi
-          echo "" >> release-notes.md
-          echo "" >> release-notes.md
-
-          echo "## ⚠️ Notes" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "- Make sure to select the correct architecture for your router" >> release-notes.md
-          echo "- If you're using a SNAPSHOT build, use the SNAPSHOT version packages" >> release-notes.md
-          echo "- For issues or feature requests, please open an issue on GitHub" >> release-notes.md
-          echo "" >> release-notes.md
-
-          echo "## 🙏  Credits" >> release-notes.md
-          echo "" >> release-notes.md
-          echo "- [jeessy2](https://github.com/jeessy2/ddns-go) - Original ddns-go project" >> release-notes.md
-          echo "- [sirpdboy](https://github.com/sirpdboy) - OpenWRT package maintainer" >> release-notes.md
-          echo "" >> release-notes.md
-
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          cat release-notes.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "=== Generated Release Notes ==="
+          {
+            echo "notes<<EOF"
+            cat release-notes.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           cat release-notes.md
-      - name: Upload to release
+
+      - name: Upload archives to Release
         uses: ncipollo/release-action@v1
         with:
-          name: OpenWRT Packages ${{ needs.get-version.outputs.version }}
+          name: OpenWrt IPK Packages ${{ needs.get-version.outputs.version }}
           tag: ${{ github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
           prerelease: false
-          artifacts: "${{ matrix.sdk }}-${{ matrix.arch }}.tar.gz"
+          artifacts: "dist/*.tar.gz"
           body: ${{ steps.release_notes.outputs.notes }}

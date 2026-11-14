@@ -2,6 +2,7 @@
 'use strict';
 'require view';
 'require fs';
+'require dom';
 'require ui';
 'require uci';
 'require form';
@@ -28,6 +29,124 @@ const updateMessageMap = {
     'Update check failed': _('Update check failed'),
     'Update status unknown': _('Update status unknown')
 };
+
+/* Parse the "key=value" lines emitted by /usr/libexec/ddns-go-alidns. */
+function parseKeyValue(text) {
+    var out = {};
+    String(text || '').split('\n').forEach(function(line) {
+        var i = line.indexOf('=');
+        if (i > 0)
+            out[line.slice(0, i).trim()] = line.slice(i + 1);
+    });
+    return out;
+}
+
+/* Render the helper's status report: what UCI asks for, what really landed
+   in ddns-go-config.yaml, and the last result ddns-go logged. */
+function renderLineStatus(kv) {
+    if (!kv || kv.ok !== '1')
+        return E('div', {}, E('span', {
+            'style': 'color:var(--color-text-warning)'
+        }, _('Status unavailable') + ': ' +
+            ((kv && kv.error) || _('Helper did not respond'))));
+
+    var rows = [], head, headColor;
+
+    if (kv.config !== 'present') {
+        head = _('ddns-go configuration not found. Save your AccessKey and domains in the ddns-go web interface first.');
+        headColor = 'var(--color-text-warning)';
+    } else if (kv.enabled !== '1') {
+        head = _('Line parameters disabled. Domains in ddns-go-config.yaml are left untouched.');
+        headColor = 'var(--color-text-secondary)';
+    } else if (kv.in_sync !== '1') {
+        head = _('Pending: settings are saved but not written into ddns-go-config.yaml yet. Click Apply now or Save & Apply.');
+        headColor = 'var(--color-text-warning)';
+    } else if (kv.service !== 'running') {
+        head = _('Parameters are in ddns-go-config.yaml, but ddns-go is not running.');
+        headColor = 'var(--color-text-warning)';
+    } else {
+        head = _('Parameters are applied and ddns-go is running.');
+        headColor = 'var(--color-text-success)';
+    }
+    rows.push(E('p', { 'style': 'color:' + headColor + ';font-weight:500' }, head));
+
+    function addRow(label, value) {
+        rows.push(E('div', { 'style': 'margin:2px 0' }, [
+            E('strong', {}, label + ': '),
+            E('span', {}, value)
+        ]));
+    }
+
+    var stateText = {
+        applied: _('Applied'),
+        pending: _('Pending'),
+        disabled: _('Disabled'),
+        missing: _('Config missing')
+    };
+
+    addRow(_('Expected parameters'),
+        kv.enabled === '1' ? (kv.expected || '-') : '-');
+    addRow(_('Service'), kv.service === 'running' ? _('RUNNING') : _('NOT RUNNING'));
+    addRow(_('Config state'), stateText[kv.state] || kv.state || '-');
+    addRow(_('Last applied'), kv.last_apply || _('Never'));
+
+    var domains = [];
+    for (var i = 1; kv['domain' + i] !== undefined; i++)
+        domains.push(E('div', { 'style': 'margin-left:12px' },
+            E('code', { 'style': 'word-break:break-all' }, kv['domain' + i])));
+    if (!domains.length)
+        domains.push(E('span', {}, _('No alidns domains found in ddns-go-config.yaml.')));
+    rows.push(E('div', { 'style': 'margin-top:6px' }, [
+        E('strong', {}, _('Domains in ddns-go-config.yaml') + ':'),
+        E('div', {}, domains)
+    ]));
+
+    var submitText = {
+        success: _('Last submission: succeeded'),
+        failed: _('Last submission: failed'),
+        unchanged: _('Last submission: IP unchanged, no update needed'),
+        unknown: _('Last submission: no record found in the log')
+    }[kv.submit] || _('Last submission: unknown');
+    var submitColor = kv.submit === 'failed' ? 'var(--color-text-danger)' :
+                      kv.submit === 'success' ? 'var(--color-text-success)' :
+                      'var(--color-text-secondary)';
+    rows.push(E('div', { 'style': 'margin-top:6px;color:' + submitColor }, submitText));
+    if (kv.submit_detail)
+        rows.push(E('div', { 'style': 'margin-left:12px;word-break:break-all' },
+            E('code', {}, kv.submit_detail)));
+
+    return E('div', { 'style': 'line-height:1.6' }, rows);
+}
+
+function fetchLineStatus() {
+    var node = document.getElementById('alidns_status');
+    if (!node) return Promise.resolve();
+    return fs.exec('/usr/libexec/ddns-go-alidns', ['status'])
+        .then(function(res) {
+            dom.content(node, renderLineStatus(parseKeyValue(res.stdout)));
+        })
+        .catch(function(err) {
+            dom.content(node, E('span', {
+                'style': 'color:var(--color-text-warning)'
+            }, _('Status unavailable') + ': ' + (err.message || String(err))));
+        });
+}
+
+/* Mirror of the shell helper, used only for the UI preview. */
+function buildLineParams() {
+    var params = [];
+    var line = uci.get('ddns-go', 'alidns', 'line') || 'default';
+    if (line === 'custom')
+        line = uci.get('ddns-go', 'alidns', 'line_code') || '';
+    if (line) params.push('Line=' + line);
+    var rid = uci.get('ddns-go', 'alidns', 'record_id') || '';
+    if (rid) params.push('RecordId=' + rid);
+    var lang = uci.get('ddns-go', 'alidns', 'lang') || '';
+    if (lang) params.push('Lang=' + lang);
+    var extra = uci.get('ddns-go', 'alidns', 'extra_params') || '';
+    if (extra) params.push(extra);
+    return params;
+}
 
 async function checkProcess() {
     try {
@@ -271,7 +390,135 @@ return view.extend({
             }
         }
     },
-    
+
+    /* alidns:AddCustomLine - create a custom line and keep its LineCode. */
+    handleCreateLine: function() {
+        var domainInput = E('input', { 'type': 'text', 'class': 'cbi-input-text' });
+        var nameInput = E('input', { 'type': 'text', 'class': 'cbi-input-text' });
+        var segInput = E('input', { 'type': 'text', 'class': 'cbi-input-text' });
+        var status = E('div', { 'style': 'margin-top: 8px' });
+
+        domainInput.value = uci.get('ddns-go', 'alidns', 'domain') || '';
+        nameInput.value = uci.get('ddns-go', 'alidns', 'custom_line_name') || '';
+        segInput.value = uci.get('ddns-go', 'alidns', 'ip_segments') || '';
+        [domainInput, nameInput, segInput].forEach(function(el) {
+            el.style.width = '100%';
+            el.style.margin = '2px 0 8px';
+        });
+
+        ui.showModal(_('Create custom line (AddCustomLine)'), [
+            E('p', {}, _('Calls alidns:AddCustomLine with the AccessKey already stored in ddns-go-config.yaml. IP segments of all custom lines under one domain must not overlap.')),
+            E('label', {}, _('Domain name')), domainInput,
+            E('label', {}, _('Custom line name')), nameInput,
+            E('label', {}, _('IP segments')), segInput,
+            E('small', {}, _('Format: 192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255')),
+            status,
+            E('div', { 'class': 'right' }, [
+                E('button', {
+                    'class': 'btn cbi-button cbi-button-positive',
+                    'click': async function() {
+                        status.textContent = _('Creating, please wait...');
+                        try {
+                            var res = await fs.exec('/usr/libexec/ddns-go-alidns', [
+                                'create_line',
+                                domainInput.value.trim(),
+                                nameInput.value.trim(),
+                                segInput.value.trim()
+                            ]);
+                            var kv = parseKeyValue(res.stdout);
+                            if (kv.ok !== '1')
+                                throw new Error(kv.error || _('Unknown error'));
+
+                            await uci.set('ddns-go', 'alidns', 'line', 'custom');
+                            await uci.set('ddns-go', 'alidns', 'line_code', kv.linecode);
+                            await uci.set('ddns-go', 'alidns', 'domain', domainInput.value.trim());
+                            await uci.set('ddns-go', 'alidns', 'custom_line_name', nameInput.value.trim());
+                            await uci.set('ddns-go', 'alidns', 'ip_segments', segInput.value.trim());
+                            await uci.save('ddns-go');
+                            await uci.apply();
+
+                            status.textContent = String.format('%s %s. %s',
+                                _('Custom line created:'), kv.linecode,
+                                _('Reload this page to refresh the fields.'));
+                            fetchLineStatus();
+                        } catch (err) {
+                            status.textContent = _('ERROR:') + ' ' + (err.message || String(err));
+                        }
+                    }
+                }, _('Create')),
+                ' ',
+                E('button', { 'class': 'btn cbi-button cbi-button-neutral', 'click': ui.hideModal }, _('Close'))
+            ])
+        ]);
+    },
+
+    /* Save the form, commit UCI, then let the helper append the parameters
+       after ddns-go has produced its own configuration, and restart ddns-go.
+       uci.apply() is required: map.save() only writes the UCI delta, while
+       the helper is a separate process that must see the committed values. */
+    handleApplyLine: function(map) {
+        return Promise.resolve(map && typeof map.save === 'function' ? map.save() : null)
+            .then(function() {
+                return uci.apply();
+            })
+            .then(function() {
+                return fs.exec('/usr/libexec/ddns-go-alidns', ['apply']);
+            })
+            .then(function(res) {
+                var kv = parseKeyValue(res.stdout);
+                if (kv.ok !== '1')
+                    throw new Error(kv.error || (res.stderr || '').trim() || _('Apply failed'));
+                return fs.exec('/etc/init.d/ddns-go', ['restart']);
+            })
+            .then(function() {
+                return fs.exec('/usr/libexec/ddns-go-alidns', ['status']);
+            })
+            .then(function(res) {
+                ui.showModal(_('Alidns line applied'), [
+                    E('p', {}, _('The line parameters were written to ddns-go-config.yaml and the service was restarted.')),
+                    renderLineStatus(parseKeyValue(res.stdout)),
+                    E('div', { 'class': 'right' }, [
+                        E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close'))
+                    ])
+                ]);
+                return fetchLineStatus();
+            })
+            .catch(function(err) {
+                ui.showModal(_('ERROR:'), [
+                    E('p', {}, err.message || String(err)),
+                    E('div', { 'class': 'right' }, [
+                        E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close'))
+                    ])
+                ]);
+            });
+    },
+
+    /* Clearing must also turn the UCI switch off, otherwise the next service
+       restart (and the init hook) would inject the parameters again. */
+    handleClearLine: function() {
+        return Promise.resolve(uci.set('ddns-go', 'alidns', 'enabled', '0'))
+            .then(function() { return uci.save(); })
+            .then(function() { return uci.apply(); })
+            .then(function() {
+                return fs.exec('/usr/libexec/ddns-go-alidns', ['clear']);
+            })
+            .then(function(res) {
+                var kv = parseKeyValue(res.stdout);
+                if (kv.ok !== '1')
+                    throw new Error(kv.error || _('Clear failed'));
+                return fs.exec('/etc/init.d/ddns-go', ['restart']);
+            })
+            .then(function() {
+                var cb = document.querySelector('input[id="widget.cbid.ddns-go.alidns.enabled"]');
+                if (cb) cb.checked = false;
+                alert(_('Line parameters removed from ddns-go-config.yaml.'));
+                return fetchLineStatus();
+            })
+            .catch(function(err) {
+                alert(_('ERROR:') + '\n' + (err.message || String(err)));
+            });
+    },
+
     render: function(data) {
         var m, s, o;
         
@@ -383,6 +630,140 @@ return view.extend({
             ]);
         };
         
-        return m.render();
+        /* Alidns line & extended options.
+           ddns-go keeps its own configuration; this section only appends
+           query parameters to the domains ddns-go has already saved. */
+        s = m.section(form.NamedSection, 'alidns', 'alidns',
+            _('Alidns Line & Extended Options'),
+            _('Append Line and other API parameters to the domains already configured in ddns-go. Disabled by default; ddns-go itself is never modified.'));
+
+        o = s.option(form.Flag, 'enabled', _('Apply line parameters'));
+        o.default = o.disabled;
+        o.rmempty = false;
+        o.description = _('Rewrite the domain entries in ddns-go-config.yaml with the parameters below. Requires a service restart.');
+
+        o = s.option(form.ListValue, 'line', _('DNS line (Line)'));
+        o.description = _('Line CODE passed to alidns:AddDomainRecord / UpdateDomainRecord. See the Alibaba Cloud line enumeration.');
+        o.value('default', _('Default (default)'));
+        o.value('telecom', _('China Telecom (telecom)'));
+        o.value('unicom', _('China Unicom (unicom)'));
+        o.value('mobile', _('China Mobile (mobile)'));
+        o.value('edu', _('China Education Network (edu)'));
+        o.value('drpeng', _('Dr.Peng (drpeng)'));
+        o.value('btvn', _('China Broadcasting Network (btvn)'));
+        o.value('cstnet', _('CSTNET (cstnet)'));
+        o.value('aliyun', _('Alibaba Cloud (aliyun)'));
+        o.value('search', _('Search engine (search)'));
+        o.value('oversea', _('Outside mainland China (oversea)'));
+        o.value('internal', _('Mainland China (internal)'));
+        o.value('custom', _('Custom line (LineCode)'));
+        o.default = 'default';
+        o.rmempty = false;
+
+        o = s.option(form.Value, 'line_code', _('Custom line code'));
+        o.depends('line', 'custom');
+        o.placeholder = 'hra0yc-597';
+        o.description = _('LineCode returned by alidns:AddCustomLine, e.g. hra0yc-597. Create one with the button below.');
+
+        o = s.option(form.Value, 'record_id', _('RecordId (optional)'));
+        o.description = _('Bind to a specific existing record. Useful when one domain has several records.');
+
+        o = s.option(form.ListValue, 'lang', _('API language (Lang)'));
+        o.value('', _('Not set (use ddns-go default)'));
+        o.value('zh', _('Chinese (zh)'));
+        o.value('en', _('English (en)'));
+        o.default = '';
+
+        o = s.option(form.Value, 'extra_params', _('Extra API parameters'));
+        o.placeholder = 'UserClientIp=192.0.2.1';
+        o.description = _('Extra parameters appended to the domain, e.g. UserClientIp=192.0.2.1&Priority=5. Do not set TTL here, ddns-go controls it.');
+
+        o = s.option(form.ListValue, 'apply_to', _('Apply to'));
+        o.value('all', _('IPv4 and IPv6 domains'));
+        o.value('ipv4', _('IPv4 domains only'));
+        o.value('ipv6', _('IPv6 domains only'));
+        o.default = 'all';
+
+        /* Live status: UCI vs. what actually landed in the YAML, plus the
+           last provider submission result read from ddns-go's log. */
+        o = s.option(form.DummyValue, '_line_status', _('Effective & submission status'));
+        o.rawhtml = true;
+        o.cfgvalue = function() {
+            return E('div', { 'id': 'alidns_status', 'style': 'line-height:1.6' }, [
+                E('span', { 'class': 'spinning' }), ' ', _('Checking status...')
+            ]);
+        };
+
+        o = s.option(form.DummyValue, '_line_preview', _('Resulting domain parameter'));
+        o.rawhtml = true;
+        o.cfgvalue = function() {
+            var p = buildLineParams();
+            return E('code', { 'style': 'word-break: break-all' },
+                'example.com' + (p.length ? '?' + p.join('&') : ''));
+        };
+
+        o = s.option(form.Value, 'domain', _('Domain name for custom line'));
+        o.description = _('Main domain used by alidns:AddCustomLine, e.g. example.com.');
+
+        o = s.option(form.Value, 'custom_line_name', _('Custom line name'));
+        o.placeholder = _('Beijing line');
+
+        o = s.option(form.Value, 'ip_segments', _('IP segments'));
+        o.placeholder = '192.0.2.0-192.0.2.254';
+        o.description = _('Format: 192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255');
+
+        o = s.option(form.Button, '_create_line', _('Custom line'));
+        o.inputtitle = _('Create');
+        o.inputstyle = 'apply';
+        o.description = _('Calls alidns:AddCustomLine using the AccessKey already stored in ddns-go-config.yaml.');
+        o.onclick = L.bind(this.handleCreateLine, this);
+
+        o = s.option(form.Button, '_apply_line', _('Apply now'));
+        o.inputtitle = _('Apply');
+        o.inputstyle = 'apply';
+        o.description = _('Save these settings, append the parameters to ddns-go-config.yaml and restart the service.');
+        o.onclick = L.bind(this.handleApplyLine, this, m);
+
+        o = s.option(form.Button, '_clear_line', _('Clear line parameters'));
+        o.inputtitle = _('Clear');
+        o.inputstyle = 'remove';
+        o.description = _('Remove the parameters managed by this plugin from ddns-go-config.yaml and restart the service.');
+        o.onclick = L.bind(this.handleClearLine, this);
+
+        /* LuCI's own "Save & Apply" only commits UCI. Wrap it so a plain form
+           submit also finishes the injection and restarts ddns-go, no matter
+           how this system's reload trigger happens to be wired. */
+        if (typeof m.handleSaveApply === 'function') {
+            var saveApply = m.handleSaveApply.bind(m);
+            m.handleSaveApply = function(ev) {
+                return Promise.resolve(saveApply(ev))
+                    .then(function() {
+                        return fs.exec('/usr/libexec/ddns-go-alidns', ['apply']);
+                    })
+                    .then(function(res) {
+                        var kv = parseKeyValue(res.stdout);
+                        if (kv.ok !== '1')
+                            throw new Error(kv.error || (res.stderr || '').trim() || _('Apply failed'));
+                        return fs.exec('/etc/init.d/ddns-go', ['restart']);
+                    })
+                    .then(fetchLineStatus)
+                    .catch(function(err) {
+                        ui.showModal(_('ERROR:'), [
+                            E('p', {}, err.message || String(err)),
+                            E('div', { 'class': 'right' }, [
+                                E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Close'))
+                            ])
+                        ]);
+                    });
+            };
+        }
+
+        window.lineStatusPoll = fetchLineStatus;
+        poll.add(fetchLineStatus, 5);
+
+        return Promise.resolve(m.render()).then(function(node) {
+            setTimeout(fetchLineStatus, 100);
+            return node;
+        });
     }
 });

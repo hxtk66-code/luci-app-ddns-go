@@ -14,7 +14,9 @@ PKG_MAINTAINER:=sirpdboy  <herboy2008@gmail.com>
 PKG_CONFIG_DEPENDS:=
 
 LUCI_TITLE:=LuCI Support for Dynamic ddns-go Client
-LUCI_DEPENDS:=+ddns-go
+# curl + openssl-util are needed by /usr/libexec/ddns-go-alidns
+# (alidns:AddCustomLine RPC signature and HTTPS request).
+LUCI_DEPENDS:=+ddns-go +curl +openssl-util
 LUCI_PKGARCH:=all
 
 

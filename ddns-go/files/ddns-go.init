@@ -58,7 +58,14 @@ start_instance() {
     fi
     
     init_yaml
-    
+
+    # Apply Alidns line / extended options to ddns-go-config.yaml before
+    # the daemon reads it. No-op when the alidns section is disabled or
+    # when the LuCI helper script is not installed.
+    if [ -x /usr/libexec/ddns-go-alidns ]; then
+        /usr/libexec/ddns-go-alidns apply >/dev/null 2>&1 || :
+    fi
+
     local args=$(build_args "$cfg")
     
     procd_open_instance
@@ -77,6 +84,14 @@ start_instance() {
 start_service() {
     config_load "$NAME"
     config_foreach start_instance 'basic'
+}
+
+# LuCI "Save & Apply" ends in uci.apply() -> reload_config, which lands here.
+# ddns-go caches ddns-go-config.yaml in memory, so a plain reload would leave
+# the old line parameters active. Restart instead: start_instance() re-runs
+# init_yaml and the alidns helper before the daemon reads its config again.
+reload_service() {
+    restart
 }
 
 service_triggers() {

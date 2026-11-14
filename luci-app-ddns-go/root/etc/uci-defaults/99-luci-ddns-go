@@ -1,8 +1,23 @@
 #!/bin/sh
 
+# /etc/config/ddns-go is a conffile: on upgrades it is kept as-is, so a
+# section added in a newer package version would otherwise be missing.
+# Add the alidns defaults once, without touching any existing settings.
+if [ -f /etc/config/ddns-go ] && ! uci -q get ddns-go.alidns >/dev/null 2>&1; then
+    uci -q batch <<'EOF'
+set ddns-go.alidns=alidns
+set ddns-go.alidns.enabled=0
+set ddns-go.alidns.line=default
+set ddns-go.alidns.apply_to=all
+commit ddns-go
+EOF
+fi
+
 chmod +x /usr/share/rpcd/ucode/luci.ddns-go
 chown root:www-data /usr/libexec/ddns-go-call
 chmod 750 /usr/libexec/ddns-go-call
+chown root:root /usr/libexec/ddns-go-alidns
+chmod 750 /usr/libexec/ddns-go-alidns
 rm -f /tmp/luci-indexcache
 /etc/init.d/rpcd restart
 exit 0

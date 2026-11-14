@@ -185,3 +185,288 @@ msgstr ""
 
 msgid "Found %d ddns-go entries. Last updated: %s"
 msgstr ""
+
+msgid "Alidns Line & Extended Options"
+msgstr ""
+
+msgid "Append Line and other API parameters to the domains already configured in ddns-go. Disabled by default; ddns-go itself is never modified."
+msgstr ""
+
+msgid "Apply line parameters"
+msgstr ""
+
+msgid "Rewrite the domain entries in ddns-go-config.yaml with the parameters below. Requires a service restart."
+msgstr ""
+
+msgid "DNS line (Line)"
+msgstr ""
+
+msgid "Line CODE passed to alidns:AddDomainRecord / UpdateDomainRecord. See the Alibaba Cloud line enumeration."
+msgstr ""
+
+msgid "Default (default)"
+msgstr ""
+
+msgid "China Telecom (telecom)"
+msgstr ""
+
+msgid "China Unicom (unicom)"
+msgstr ""
+
+msgid "China Mobile (mobile)"
+msgstr ""
+
+msgid "China Education Network (edu)"
+msgstr ""
+
+msgid "Dr.Peng (drpeng)"
+msgstr ""
+
+msgid "China Broadcasting Network (btvn)"
+msgstr ""
+
+msgid "CSTNET (cstnet)"
+msgstr ""
+
+msgid "Alibaba Cloud (aliyun)"
+msgstr ""
+
+msgid "Search engine (search)"
+msgstr ""
+
+msgid "Outside mainland China (oversea)"
+msgstr ""
+
+msgid "Mainland China (internal)"
+msgstr ""
+
+msgid "Custom line (LineCode)"
+msgstr ""
+
+msgid "Custom line code"
+msgstr ""
+
+msgid "LineCode returned by alidns:AddCustomLine, e.g. hra0yc-597. Create one with the button below."
+msgstr ""
+
+msgid "RecordId (optional)"
+msgstr ""
+
+msgid "Bind to a specific existing record. Useful when one domain has several records."
+msgstr ""
+
+msgid "API language (Lang)"
+msgstr ""
+
+msgid "Not set (use ddns-go default)"
+msgstr ""
+
+msgid "Chinese (zh)"
+msgstr ""
+
+msgid "English (en)"
+msgstr ""
+
+msgid "Extra API parameters"
+msgstr ""
+
+msgid "Extra parameters appended to the domain, e.g. UserClientIp=192.0.2.1&Priority=5. Do not set TTL here, ddns-go controls it."
+msgstr ""
+
+msgid "Apply to"
+msgstr ""
+
+msgid "IPv4 and IPv6 domains"
+msgstr ""
+
+msgid "IPv4 domains only"
+msgstr ""
+
+msgid "IPv6 domains only"
+msgstr ""
+
+msgid "Resulting domain parameter"
+msgstr ""
+
+msgid "Domain name for custom line"
+msgstr ""
+
+msgid "Main domain used by alidns:AddCustomLine, e.g. example.com."
+msgstr ""
+
+msgid "Custom line name"
+msgstr ""
+
+msgid "Beijing line"
+msgstr ""
+
+msgid "IP segments"
+msgstr ""
+
+msgid "Format: 192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255"
+msgstr ""
+
+msgid "Custom line"
+msgstr ""
+
+msgid "Calls alidns:AddCustomLine using the AccessKey already stored in ddns-go-config.yaml."
+msgstr ""
+
+msgid "Create"
+msgstr ""
+
+msgid "Apply now"
+msgstr ""
+
+msgid "Apply"
+msgstr ""
+
+msgid "Save these settings, append the parameters to ddns-go-config.yaml and restart the service."
+msgstr ""
+
+msgid "Clear line parameters"
+msgstr ""
+
+msgid "Clear"
+msgstr ""
+
+msgid "Remove the parameters managed by this plugin from ddns-go-config.yaml and restart the service."
+msgstr ""
+
+msgid "Create custom line (AddCustomLine)"
+msgstr ""
+
+msgid "Calls alidns:AddCustomLine with the AccessKey already stored in ddns-go-config.yaml. IP segments of all custom lines under one domain must not overlap."
+msgstr ""
+
+msgid "Domain name"
+msgstr ""
+
+msgid "Creating, please wait..."
+msgstr ""
+
+msgid "Unknown error"
+msgstr ""
+
+msgid "Custom line created:"
+msgstr ""
+
+msgid "Reload this page to refresh the fields."
+msgstr ""
+
+msgid "Apply failed"
+msgstr ""
+
+msgid "Alidns line applied"
+msgstr ""
+
+msgid "The line parameters were written to ddns-go-config.yaml and the service was restarted."
+msgstr ""
+
+msgid "Clear failed"
+msgstr ""
+
+msgid "Line parameters removed from ddns-go-config.yaml."
+msgstr ""
+
+msgid "Check"
+msgstr ""
+
+msgid "Current Version"
+msgstr ""
+
+msgid "DDNS-Go"
+msgstr ""
+
+msgid "No"
+msgstr ""
+
+msgid "Number of times to compare with service provider (1-60)"
+msgstr ""
+
+msgid "Port number (1-65535)"
+msgstr ""
+
+msgid "Provider comparison interval"
+msgstr ""
+
+msgid "Update interval (seconds)"
+msgstr ""
+
+msgid "Update interval in seconds (60-86400)"
+msgstr ""
+
+msgid "Yes"
+msgstr ""
+
+msgid "Effective & submission status"
+msgstr ""
+
+msgid "Status unavailable"
+msgstr ""
+
+msgid "Helper did not respond"
+msgstr ""
+
+msgid "ddns-go configuration not found. Save your AccessKey and domains in the ddns-go web interface first."
+msgstr ""
+
+msgid "Line parameters disabled. Domains in ddns-go-config.yaml are left untouched."
+msgstr ""
+
+msgid "Pending: settings are saved but not written into ddns-go-config.yaml yet. Click Apply now or Save & Apply."
+msgstr ""
+
+msgid "Parameters are in ddns-go-config.yaml, but ddns-go is not running."
+msgstr ""
+
+msgid "Parameters are applied and ddns-go is running."
+msgstr ""
+
+msgid "Applied"
+msgstr ""
+
+msgid "Pending"
+msgstr ""
+
+msgid "Disabled"
+msgstr ""
+
+msgid "Config missing"
+msgstr ""
+
+msgid "Expected parameters"
+msgstr ""
+
+msgid "Service"
+msgstr ""
+
+msgid "Config state"
+msgstr ""
+
+msgid "Last applied"
+msgstr ""
+
+msgid "Never"
+msgstr ""
+
+msgid "Domains in ddns-go-config.yaml"
+msgstr ""
+
+msgid "No alidns domains found in ddns-go-config.yaml."
+msgstr ""
+
+msgid "Last submission: succeeded"
+msgstr ""
+
+msgid "Last submission: failed"
+msgstr ""
+
+msgid "Last submission: IP unchanged, no update needed"
+msgstr ""
+
+msgid "Last submission: no record found in the log"
+msgstr ""
+
+msgid "Last submission: unknown"
+msgstr ""

@@ -197,3 +197,267 @@ msgstr "谷歌 DNS 8.8.4.4"
 
 msgid "Found %d ddns-go entries. Last updated: %s"
 msgstr "找到 %d ddns-go记录，最近时间: %s"
+
+msgid "Alidns Line & Extended Options"
+msgstr "阿里云线路与扩展选项"
+
+msgid "Append Line and other API parameters to the domains already configured in ddns-go. Disabled by default; ddns-go itself is never modified."
+msgstr "在 ddns-go 已配置的域名后追加 Line 等接口参数。默认关闭，不会修改 ddns-go 程序本身。"
+
+msgid "Apply line parameters"
+msgstr "启用线路参数"
+
+msgid "Rewrite the domain entries in ddns-go-config.yaml with the parameters below. Requires a service restart."
+msgstr "按下列参数改写 ddns-go-config.yaml 中的域名条目，需要重启服务后生效。"
+
+msgid "DNS line (Line)"
+msgstr "解析线路（Line）"
+
+msgid "Line CODE passed to alidns:AddDomainRecord / UpdateDomainRecord. See the Alibaba Cloud line enumeration."
+msgstr "传递给阿里云 AddDomainRecord / UpdateDomainRecord 的线路 CODE，取值见阿里云解析线路枚举。"
+
+msgid "Default (default)"
+msgstr "默认线路（default）"
+
+msgid "China Telecom (telecom)"
+msgstr "中国电信（telecom）"
+
+msgid "China Unicom (unicom)"
+msgstr "中国联通（unicom）"
+
+msgid "China Mobile (mobile)"
+msgstr "中国移动（mobile）"
+
+msgid "China Education Network (edu)"
+msgstr "中国教育网（edu）"
+
+msgid "Dr.Peng (drpeng)"
+msgstr "鹏博士（drpeng）"
+
+msgid "China Broadcasting Network (btvn)"
+msgstr "中国广电（btvn）"
+
+msgid "CSTNET (cstnet)"
+msgstr "科技网（cstnet）"
+
+msgid "Alibaba Cloud (aliyun)"
+msgstr "阿里云线路（aliyun）"
+
+msgid "Search engine (search)"
+msgstr "搜索引擎（search）"
+
+msgid "Outside mainland China (oversea)"
+msgstr "境外（oversea）"
+
+msgid "Mainland China (internal)"
+msgstr "中国内地（internal）"
+
+msgid "Custom line (LineCode)"
+msgstr "自定义线路（LineCode）"
+
+msgid "Custom line code"
+msgstr "自定义线路 Code"
+
+msgid "LineCode returned by alidns:AddCustomLine, e.g. hra0yc-597. Create one with the button below."
+msgstr "由 alidns:AddCustomLine 返回的 LineCode，例如 hra0yc-597，可通过下方按钮创建。"
+
+msgid "RecordId (optional)"
+msgstr "RecordId（可选）"
+
+msgid "Bind to a specific existing record. Useful when one domain has several records."
+msgstr "绑定到指定的已有解析记录，适用于同一域名存在多条记录的场景。"
+
+msgid "API language (Lang)"
+msgstr "接口语言（Lang）"
+
+msgid "Not set (use ddns-go default)"
+msgstr "不设置（跟随 ddns-go 默认值）"
+
+msgid "Chinese (zh)"
+msgstr "中文（zh）"
+
+msgid "English (en)"
+msgstr "英文（en）"
+
+msgid "Extra API parameters"
+msgstr "其它接口参数"
+
+msgid "Extra parameters appended to the domain, e.g. UserClientIp=192.0.2.1&Priority=5. Do not set TTL here, ddns-go controls it."
+msgstr "追加到域名的其它参数，例如 UserClientIp=192.0.2.1&Priority=5。TTL 由 ddns-go 控制，请勿在此填写。"
+
+msgid "Apply to"
+msgstr "应用范围"
+
+msgid "IPv4 and IPv6 domains"
+msgstr "IPv4 与 IPv6 域名"
+
+msgid "IPv4 domains only"
+msgstr "仅 IPv4 域名"
+
+msgid "IPv6 domains only"
+msgstr "仅 IPv6 域名"
+
+msgid "Resulting domain parameter"
+msgstr "生成的域名参数示例"
+
+msgid "Domain name for custom line"
+msgstr "自定义线路所属域名"
+
+msgid "Main domain used by alidns:AddCustomLine, e.g. example.com."
+msgstr "alidns:AddCustomLine 使用的主域名，例如 example.com。"
+
+msgid "Custom line name"
+msgstr "自定义线路名称"
+
+msgid "Beijing line"
+msgstr "北京线路"
+
+msgid "IP segments"
+msgstr "IP 段"
+
+msgid "Format: 192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255"
+msgstr "格式：192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255"
+
+msgid "Custom line"
+msgstr "自定义线路"
+
+msgid "Calls alidns:AddCustomLine using the AccessKey already stored in ddns-go-config.yaml."
+msgstr "使用 ddns-go-config.yaml 中已保存的 AccessKey 调用 alidns:AddCustomLine。"
+
+msgid "Create"
+msgstr "创建"
+
+msgid "Apply now"
+msgstr "立即应用"
+
+msgid "Apply"
+msgstr "应用"
+
+msgid "Save these settings, append the parameters to ddns-go-config.yaml and restart the service."
+msgstr "保存本页设置，把参数追加到 ddns-go-config.yaml 并重启服务。"
+
+msgid "Clear line parameters"
+msgstr "清除线路参数"
+
+msgid "Clear"
+msgstr "清除"
+
+msgid "Remove the parameters managed by this plugin from ddns-go-config.yaml and restart the service."
+msgstr "从 ddns-go-config.yaml 中移除本插件管理的参数并重启服务。"
+
+msgid "Create custom line (AddCustomLine)"
+msgstr "创建自定义线路（AddCustomLine）"
+
+msgid "Calls alidns:AddCustomLine with the AccessKey already stored in ddns-go-config.yaml. IP segments of all custom lines under one domain must not overlap."
+msgstr "使用 ddns-go-config.yaml 中已有的 AccessKey 调用 alidns:AddCustomLine。同一域名下所有自定义线路的 IP 段不能交叉重叠。"
+
+msgid "Domain name"
+msgstr "域名"
+
+msgid "Creating, please wait..."
+msgstr "正在创建，请稍候..."
+
+msgid "Unknown error"
+msgstr "未知错误"
+
+msgid "Custom line created:"
+msgstr "自定义线路已创建："
+
+msgid "Reload this page to refresh the fields."
+msgstr "请刷新本页面以更新表单内容。"
+
+msgid "Apply failed"
+msgstr "应用失败"
+
+msgid "Alidns line applied"
+msgstr "阿里云线路已应用"
+
+msgid "The line parameters were written to ddns-go-config.yaml and the service was restarted."
+msgstr "线路参数已写入 ddns-go-config.yaml，服务已重启。"
+
+msgid "Clear failed"
+msgstr "清除失败"
+
+msgid "Line parameters removed from ddns-go-config.yaml."
+msgstr "已从 ddns-go-config.yaml 中移除线路参数。"
+
+msgid "DDNS-Go"
+msgstr "DDNS-Go"
+
+msgid "No"
+msgstr "否"
+
+msgid "Yes"
+msgstr "是"
+
+msgid "Effective & submission status"
+msgstr "生效与提交状态"
+
+msgid "Status unavailable"
+msgstr "状态不可用"
+
+msgid "Helper did not respond"
+msgstr "辅助脚本未返回数据"
+
+msgid "ddns-go configuration not found. Save your AccessKey and domains in the ddns-go web interface first."
+msgstr "未找到 ddns-go 配置文件。请先在 ddns-go 自带 Web 界面保存 AccessKey 与域名。"
+
+msgid "Line parameters disabled. Domains in ddns-go-config.yaml are left untouched."
+msgstr "线路参数已禁用，ddns-go-config.yaml 中的域名保持原样。"
+
+msgid "Pending: settings are saved but not written into ddns-go-config.yaml yet. Click Apply now or Save & Apply."
+msgstr "待应用：设置已保存但尚未写入 ddns-go-config.yaml，请点击「立即应用」或「保存并应用」。"
+
+msgid "Parameters are in ddns-go-config.yaml, but ddns-go is not running."
+msgstr "参数已写入 ddns-go-config.yaml，但 ddns-go 未运行。"
+
+msgid "Parameters are applied and ddns-go is running."
+msgstr "参数已生效，ddns-go 正在运行。"
+
+msgid "Applied"
+msgstr "已生效"
+
+msgid "Pending"
+msgstr "待应用"
+
+msgid "Disabled"
+msgstr "已禁用"
+
+msgid "Config missing"
+msgstr "配置文件缺失"
+
+msgid "Expected parameters"
+msgstr "期望参数"
+
+msgid "Service"
+msgstr "服务"
+
+msgid "Config state"
+msgstr "配置状态"
+
+msgid "Last applied"
+msgstr "上次应用时间"
+
+msgid "Never"
+msgstr "从未"
+
+msgid "Domains in ddns-go-config.yaml"
+msgstr "ddns-go-config.yaml 中的域名"
+
+msgid "No alidns domains found in ddns-go-config.yaml."
+msgstr "ddns-go-config.yaml 中未找到 alidns 域名。"
+
+msgid "Last submission: succeeded"
+msgstr "最近一次提交：成功"
+
+msgid "Last submission: failed"
+msgstr "最近一次提交：失败"
+
+msgid "Last submission: IP unchanged, no update needed"
+msgstr "最近一次提交：IP 未变化，无需更新"
+
+msgid "Last submission: no record found in the log"
+msgstr "最近一次提交：日志中未找到记录"
+
+msgid "Last submission: unknown"
+msgstr "最近一次提交：状态未知"

@@ -1,0 +1,628 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Alidns line / extended options helper for luci-app-ddns-go.
+#
+# ddns-go passes every query parameter appended to a domain name
+# (example.com?Line=telecom&Lang=zh) straight to the Alidns API.
+# AddCustomLine creates a custom line and returns a LineCode (hra0yc-597),
+# which is a valid value for the "Line" parameter of Add/UpdateDomainRecord.
+#
+# Commands (all print "key=value" lines on stdout):
+#   preview                                  -> ok, params, sample
+#   apply                                    -> ok, changed, params (inject into YAML)
+#   clear                                    -> ok, changed        (remove injected params)
+#   status                                   -> ok, enabled, service, config, state,
+#                                               in_sync, domain*, last_apply, submit*
+#   create_line <DomainName> <LineName> <IpSegments>
+#                                            -> ok, linecode, lineid, requestid
+#       IpSegments: "192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255"
+#                   or a raw JSON array produced by the AddCustomLine API doc.
+#
+# DDNS_GO_CONFIG / UCI_BIN may be overridden for debugging.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+
+CONF=${DDNS_GO_CONFIG:-/etc/ddns-go/ddns-go-config.yaml}
+UCI_BIN=${UCI_BIN:-/sbin/uci}
+LAST=${DDNS_GO_STATUS_FILE:-/tmp/ddns-go-alidns.last}
+ENDPOINT=https://alidns.aliyuncs.com/
+
+# BusyBox od does not support -v on every build; GNU od needs it to avoid
+# folding repeated byte lines into "*". Detect once at startup.
+OD_ARGS='-An -tu1'
+if printf 'x' | od -An -v -tu1 >/dev/null 2>&1; then
+    OD_ARGS='-An -v -tu1'
+fi
+
+ok() {
+    printf 'ok=1\n'
+    printf '%s\n' "$@"
+    exit 0
+}
+
+fail() {
+    printf 'ok=0\nerror=%s\n' "$1"
+    exit 1
+}
+
+log() { logger -t ddns-go-alidns "$1" 2>/dev/null || :; }
+
+uci_get() {
+    val=""
+    if [ -x "$UCI_BIN" ]; then
+        val=$("$UCI_BIN" -q get "ddns-go.alidns.$1" 2>/dev/null) || val=""
+    fi
+    if [ -z "$val" ]; then
+        printf '%s' "$2"
+    else
+        printf '%s' "$val"
+    fi
+}
+
+uci_set() {
+    [ -x "$UCI_BIN" ] || return 0
+    "$UCI_BIN" -q set "ddns-go.alidns.$1=$2" >/dev/null 2>&1 || :
+}
+
+uci_commit() {
+    [ -x "$UCI_BIN" ] || return 0
+    "$UCI_BIN" -q commit ddns-go >/dev/null 2>&1 || :
+}
+
+# RFC 3986 percent-encoding (byte-wise, so UTF-8 line names work).
+urlencode() {
+    [ -n "$1" ] || return 0
+    # Byte-wise encoding: UTF-8 custom line names stay intact, and only
+    # RFC 3986 unreserved characters are left unescaped.
+    printf '%s' "$1" | od $OD_ARGS | tr -s ' ' '\n' | awk '
+        $1 ~ /^[0-9]+$/ {
+            b = $1 + 0;
+            if ((b >= 48 && b <= 57) || (b >= 65 && b <= 90) ||
+                (b >= 97 && b <= 122) || b == 45 || b == 46 ||
+                b == 95 || b == 126)
+                printf "%c", b;
+            else
+                printf "%%%02X", b;
+        }'
+}
+
+# Build the raw (not encoded) query string from UCI.
+# Keep the first occurrence order; a later duplicate key wins.
+build_query() {
+    line=$(uci_get line default)
+    [ "$line" = "custom" ] && line=$(uci_get line_code '')
+    record_id=$(uci_get record_id '')
+    lang=$(uci_get lang '')
+    extra=$(uci_get extra_params '')
+
+    case "$extra" in
+        *\\*) fail 'Backslashes are not allowed in extra parameters' ;;
+    esac
+
+    pairs=""
+    [ -n "$line" ] && pairs="$pairs
+Line=$line"
+    [ -n "$record_id" ] && pairs="$pairs
+RecordId=$record_id"
+    [ -n "$lang" ] && pairs="$pairs
+Lang=$lang"
+    [ -n "$extra" ] && pairs="$pairs
+$(printf '%s\n' "$extra" | tr '&' '\n')"
+
+    printf '%s\n' "$pairs" | awk '
+        /^[[:space:]]*$/ { next }
+        /^[A-Za-z][A-Za-z0-9]*=/ {
+            p = index($0, "=");
+            k = substr($0, 1, p - 1);
+            v = substr($0, p + 1);
+            lk = tolower(k);
+            if (!(lk in seen)) { order[++n] = k; seen[lk] = 1 }
+            val[k] = v;
+        }
+        END {
+            out = "";
+            for (i = 1; i <= n; i++) {
+                k = order[i];
+                out = out (out == "" ? "" : "&") k "=" val[k];
+            }
+            print out;
+        }'
+}
+
+# Lowercase managed keys: always remove these before re-adding / clearing.
+managed_keys() {
+    extra=$(uci_get extra_params '')
+    {
+        printf 'line\nrecordid\nlang\n'
+        printf '%s\n' "$extra" | tr '&' '\n' |
+            awk -F= '$1 ~ /^[A-Za-z][A-Za-z0-9]*$/ { print tolower($1) }'
+    } | awk 'NF && !seen[$0]++ { printf "%s%s", (n++ ? "," : ""), $0 }'
+    printf '\n'
+}
+
+# Rewrite alidns domain entries in ddns-go-config.yaml.
+# q       : raw query to append (empty for "clear")
+# managed : comma separated lowercase keys owned by this plugin
+# target  : all | ipv4 | ipv6
+rewrite_yaml() {
+    q=$1
+    managed=$2
+    target=$3
+
+    awk -v q="$q" -v managed="$managed" -v target="$target" '
+        function ind(s) {
+            match(s, /[^ ]/);
+            return RSTART ? RSTART - 1 : 0;
+        }
+        function rewrite(s, section,    pfx, val, quote, comment, host, query,
+                                        out, np, parts, i, p, k, kl, res) {
+            if (target != "all" && target != section) return s;
+            pfx = "";
+            if (match(s, /^[ ]*-[ ]*/)) pfx = substr(s, 1, RLENGTH);
+            val = substr(s, length(pfx) + 1);
+
+            # Preserve a trailing " # comment" added by hand-written configs.
+            comment = "";
+            p = index(val, " #");
+            if (p) {
+                comment = substr(val, p);
+                val = substr(val, 1, p - 1);
+            }
+
+            quote = "";
+            if (length(val) >= 2) {
+                fc = substr(val, 1, 1);
+                if (fc == "\"" || fc == sprintf("%c", 39)) {
+                    if (substr(val, length(val), 1) == fc) {
+                        quote = fc;
+                        val = substr(val, 2, length(val) - 2);
+                    }
+                }
+            }
+            if (val == "" || val == "~" || val == "null") return s;
+
+            p = index(val, "?");
+            if (p) { host = substr(val, 1, p - 1); query = substr(val, p + 1) }
+            else   { host = val; query = "" }
+
+            out = "";
+            np = split(query, parts, "&");
+            for (i = 1; i <= np; i++) {
+                if (parts[i] == "") continue;
+                p = index(parts[i], "=");
+                k = (p ? substr(parts[i], 1, p - 1) : parts[i]);
+                kl = tolower(k);
+                if (kl in M || kl in Q) continue;
+                out = out (out == "" ? "" : "&") parts[i];
+            }
+            for (i = 1; i <= nq; i++) {
+                k = qorder[i];
+                out = out (out == "" ? "" : "&") k "=" qval[k];
+            }
+
+            res = host (out == "" ? "" : "?" out);
+            if (quote != "") res = quote res quote;
+            return pfx res comment;
+        }
+
+        { L[NR] = $0 }
+        END {
+            n = NR;
+            nm = split(managed, mk, ",");
+            for (i = 1; i <= nm; i++) if (mk[i] != "") M[mk[i]] = 1;
+
+            nqp = split(q, qa, "&");
+            for (i = 1; i <= nqp; i++) {
+                p = index(qa[i], "=");
+                if (!p) continue;
+                k = substr(qa[i], 1, p - 1);
+                v = substr(qa[i], p + 1);
+                lk = tolower(k);
+                if (!(lk in qseen)) { qorder[++nq] = k; qseen[lk] = 1 }
+                qval[k] = v;
+                Q[lk] = 1;
+            }
+
+            # Pass 1: locate dnsconf entries that use the alidns provider.
+            in_cfg = 0; entry = 0; entry_ind = 9999; cfg_end = n;
+            for (i = 1; i <= n; i++) {
+                s = L[i];
+                if (s ~ /^dnsconf:[ ]*$/) { in_cfg = 1; continue }
+                if (in_cfg && s ~ /^[A-Za-z_]/) { cfg_end = i - 1; break }
+                if (!in_cfg) continue;
+                if (s ~ /^[ ]*-/) {
+                    d = ind(s);
+                    if (entry == 0 || d <= entry_ind) {
+                        entry++;
+                        estart[entry] = i;
+                        eend[entry] = n;
+                        entry_ind = d;
+                        if (entry > 1) eend[entry - 1] = i - 1;
+                        isali[entry] = 0;
+                    }
+                }
+                if (entry > 0 && s ~ /^[ ]*name:[ ]*alidns[ ]*$/)
+                    isali[entry] = 1;
+            }
+            if (entry > 0) eend[entry] = cfg_end;
+
+            # Pass 2: emit, rewriting domain list items of alidns entries.
+            cur = 0; section = ""; in_domains = 0; d_ind = 0;
+            for (i = 1; i <= n; i++) {
+                s = L[i];
+                while (cur < entry && i >= estart[cur + 1]) cur++;
+                if (cur > 0 && isali[cur] && i <= eend[cur]) {
+                    if (s ~ /^[ ]*ipv4:/) section = "ipv4";
+                    else if (s ~ /^[ ]*ipv6:/) section = "ipv6";
+                    if (s ~ /^[ ]*domains:/) {
+                        in_domains = 1;
+                        d_ind = ind(s);
+                        print s;
+                        continue;
+                    }
+                    if (in_domains) {
+                        if (s ~ /^[ ]*-/ && ind(s) > d_ind) {
+                            print rewrite(s, section);
+                            continue;
+                        }
+                        in_domains = 0;
+                    }
+                }
+                print s;
+            }
+        }
+    ' "$CONF"
+}
+
+inject_yaml() {
+    q=$1
+    managed=$2
+    target=$3
+
+    [ -f "$CONF" ] || fail "ddns-go config not found: $CONF"
+    tmp="${CONF}.tmp.$$"
+    if ! rewrite_yaml "$q" "$managed" "$target" > "$tmp"; then
+        rm -f "$tmp"
+        fail 'Failed to parse ddns-go config'
+    fi
+    if cmp -s "$CONF" "$tmp"; then
+        rm -f "$tmp"
+        changed=0
+    else
+        # Redirect into the original file to preserve owner and permissions.
+        if ! cat "$tmp" > "$CONF"; then
+            rm -f "$tmp"
+            fail 'Failed to write ddns-go config'
+        fi
+        rm -f "$tmp"
+        changed=1
+        log "Alidns line parameters updated (params=$q)"
+    fi
+    printf '%s' "$changed"
+}
+
+# Read the first alidns AccessKey pair from ddns-go-config.yaml.
+read_credentials() {
+    [ -r "$CONF" ] || fail "ddns-go config not found: $CONF"
+    awk '
+        function flush() {
+            if (!done && has_ali && id != "" && sk != "") {
+                printf "id=%s\nsecret=%s\n", id, sk;
+                done = 1;
+            }
+            has_ali = 0; id = ""; sk = "";
+        }
+        {
+            if ($0 ~ /^dnsconf:[ ]*$/) { in_cfg = 1; next }
+            if (in_cfg && $0 ~ /^[A-Za-z_]/) { flush(); in_cfg = 0 }
+            if (!in_cfg) next
+            if ($0 ~ /^[ ]*- /) flush();
+            if ($0 ~ /^[ ]*name:[ ]*alidns[ ]*$/) has_ali = 1;
+            if ($0 ~ /^[ ]*id:[ ]*/) {
+                v = $0; sub(/^[ ]*id:[ ]*/, "", v);
+                gsub(/^["\047]|["\047]$/, "", v); id = v;
+            }
+            if ($0 ~ /^[ ]*secret:[ ]*/) {
+                v = $0; sub(/^[ ]*secret:[ ]*/, "", v);
+                gsub(/^["\047]|["\047]$/, "", v); sk = v;
+            }
+        }
+        END { flush() }
+    ' "$CONF"
+}
+
+# "192.0.2.0-192.0.2.254,198.51.100.0-198.51.100.255" -> JSON array.
+build_ipsegment() {
+    segments=$1
+    case "$segments" in
+        \[*) printf '%s' "$segments"; return 0 ;;
+    esac
+    printf '%s\n' "$segments" | tr ',' '\n' | awk '
+        function valid(ip) {
+            return ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/;
+        }
+        NF {
+            gsub(/^[ ]+|[ ]+$/, "", $0);
+            n = split($0, a, "-");
+            if (n != 2 || !valid(a[1]) || !valid(a[2])) bad = 1;
+            out = out (out == "" ? "" : ",") "{\"StartIp\":\"" a[1] "\",\"EndIp\":\"" a[2] "\"}";
+            count++;
+        }
+        END {
+            if (bad || count == 0) { print "INVALID"; exit }
+            print "[" out "]";
+        }'
+}
+
+# Alibaba Cloud RPC style signature (HMAC-SHA1, GET).
+add_custom_line() {
+    domain=$1
+    line_name=$2
+    segments=$3
+
+    case "$domain" in
+        ''|*[!A-Za-z0-9._-]*) fail 'Invalid domain name' ;;
+    esac
+    [ -n "$line_name" ] || fail 'Custom line name is required'
+    [ -n "$segments" ] || fail 'At least one IP segment is required'
+
+    ipseg=$(build_ipsegment "$segments")
+    if [ -z "$ipseg" ] || [ "$ipseg" = "INVALID" ]; then
+        fail 'IP segments must look like 192.0.2.0-192.0.2.254'
+    fi
+
+    creds=$(read_credentials)
+    ak=$(printf '%s\n' "$creds" | sed -n 's/^id=//p' | head -n 1)
+    sk=$(printf '%s\n' "$creds" | sed -n 's/^secret=//p' | head -n 1)
+    [ -n "$ak" ] && [ -n "$sk" ] ||
+        fail 'Configure the Alidns AccessKey in the ddns-go web interface first'
+    command -v curl >/dev/null 2>&1 || fail 'curl is not installed'
+    command -v openssl >/dev/null 2>&1 || fail 'openssl-util is not installed'
+
+    nonce=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-')
+    [ -n "$nonce" ] || nonce="$(date +%s)$$"
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    pairs="AccessKeyId=$ak
+Action=AddCustomLine
+DomainName=$domain
+Format=JSON
+Lang=zh
+LineName=$line_name
+IpSegment=$ipseg
+SignatureMethod=HMAC-SHA1
+SignatureNonce=$nonce
+SignatureVersion=1.0
+Timestamp=$ts
+Version=2015-01-09"
+
+    tmpq="${CONF}.query.$$"
+    printf '%s\n' "$pairs" | while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        k=${pair%%=*}
+        v=${pair#*=}
+        printf '%s=%s\n' "$(urlencode "$k")" "$(urlencode "$v")"
+    done | LC_ALL=C sort > "$tmpq" || { rm -f "$tmpq"; fail 'Failed to encode request'; }
+
+    canonical=$(awk 'BEGIN { ORS = "" } { print (NR > 1 ? "&" : "") $0 }' "$tmpq")
+    rm -f "$tmpq"
+
+    string_to_sign="GET&%2F&$(urlencode "$canonical")"
+    signature=$(printf '%s' "$string_to_sign" |
+        openssl dgst -sha1 -hmac "$sk&" -binary 2>/dev/null |
+        openssl base64 -A 2>/dev/null)
+    [ -n "$signature" ] || fail 'Failed to sign the Alidns request'
+
+    resp=$(curl -fsS --max-time 20 \
+        "$ENDPOINT?$canonical&Signature=$(urlencode "$signature")" 2>/dev/null) ||
+        fail 'Alidns AddCustomLine request failed (network or TLS error)'
+
+    linecode=$(printf '%s' "$resp" |
+        sed -n 's/.*"LineCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    if [ -z "$linecode" ]; then
+        code=$(printf '%s' "$resp" | sed -n 's/.*"Code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        msg=$(printf '%s' "$resp" | sed -n 's/.*"Message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+        fail "AddCustomLine failed: ${code:-unknown} ${msg:-no LineCode returned}"
+    fi
+    lineid=$(printf '%s' "$resp" | sed -n 's/.*"LineId"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+    requestid=$(printf '%s' "$resp" | sed -n 's/.*"RequestId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+    # Make the freshly created line the selected one for ddns-go.
+    uci_set line custom
+    uci_set line_code "$linecode"
+    uci_set domain "$domain"
+    uci_set custom_line_name "$line_name"
+    uci_set ip_segments "$segments"
+    uci_commit
+    log "AddCustomLine created $linecode ($line_name) for $domain"
+
+    ok "linecode=$linecode" "lineid=$lineid" "requestid=$requestid" \
+       "message=Custom line created. Save the LuCI settings to apply it."
+}
+
+# Remember the last successful helper run (tmpfs: valid since last boot).
+write_stamp() {
+    printf 'time=%s\nresult=%s\nparams=%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" > "$LAST" 2>/dev/null || :
+}
+
+# List the domain entries of every alidns configuration group as
+# domain1=..., domain2=... plus domain_count=N.
+collect_domains() {
+    awk '
+        function ind(s) {
+            match(s, /[^ ]/);
+            return RSTART ? RSTART - 1 : 0;
+        }
+        { L[NR] = $0 }
+        END {
+            n = NR;
+            in_cfg = 0; entry = 0; entry_ind = 9999; cfg_end = n;
+            for (i = 1; i <= n; i++) {
+                s = L[i];
+                if (s ~ /^dnsconf:[ ]*$/) { in_cfg = 1; continue }
+                if (in_cfg && s ~ /^[A-Za-z_]/) { cfg_end = i - 1; break }
+                if (!in_cfg) continue;
+                if (s ~ /^[ ]*-/) {
+                    d = ind(s);
+                    if (entry == 0 || d <= entry_ind) {
+                        entry++;
+                        estart[entry] = i;
+                        eend[entry] = n;
+                        entry_ind = d;
+                        if (entry > 1) eend[entry - 1] = i - 1;
+                        isali[entry] = 0;
+                    }
+                }
+                if (entry > 0 && s ~ /^[ ]*name:[ ]*alidns[ ]*$/)
+                    isali[entry] = 1;
+            }
+            if (entry > 0) eend[entry] = cfg_end;
+
+            cur = 0; in_domains = 0; d_ind = 0; cnt = 0;
+            for (i = 1; i <= n; i++) {
+                s = L[i];
+                while (cur < entry && i >= estart[cur + 1]) cur++;
+                if (cur > 0 && isali[cur] && i <= eend[cur]) {
+                    if (s ~ /^[ ]*domains:/) {
+                        in_domains = 1; d_ind = ind(s); continue;
+                    }
+                    if (in_domains) {
+                        if (s ~ /^[ ]*-/ && ind(s) > d_ind) {
+                            v = s;
+                            sub(/^[ ]*-[ ]*/, "", v);
+                            p = index(v, " #");
+                            if (p) v = substr(v, 1, p - 1);
+                            gsub(/^["\047]|["\047]$/, "", v);
+                            gsub(/^[ ]+|[ ]+$/, "", v);
+                            if (v != "" && v != "~" && v != "null") {
+                                cnt++;
+                                printf "domain%d=%s\n", cnt, v;
+                            }
+                            continue;
+                        }
+                        in_domains = 0;
+                    }
+                }
+            }
+            printf "domain_count=%d\n", cnt;
+        }
+    ' "$CONF"
+}
+
+# Classify the newest ddns-go provider result found in the system log.
+last_submit() {
+    logread -l 200 2>/dev/null | grep 'ddns-go' 2>/dev/null |
+        grep -v 'ddns-go-alidns' 2>/dev/null | tail -n 40 | awk '
+        {
+            t = "";
+            if ($0 ~ /失败/ || $0 ~ /异常/ || $0 ~ /[Ff]ailed/ || $0 ~ /[Ee]rror/)
+                t = "failed";
+            else if ($0 ~ /成功/ || $0 ~ /[Ss]uccess/)
+                t = "success";
+            else if ($0 ~ /没有变化/ || $0 ~ /未改变/ || $0 ~ /未变化/ ||
+                     $0 ~ /unchanged/ || $0 ~ /no change/)
+                t = "unchanged";
+            if (t != "") { s = t; m = $0 }
+        }
+        END {
+            if (s == "") s = "unknown";
+            gsub(/[\r\n\t]/, " ", m);
+            if (length(m) > 180) m = substr(m, 1, 180) "...";
+            printf "submit=%s\nsubmit_detail=%s\n", s, m;
+        }' 2>/dev/null || printf 'submit=unknown\nsubmit_detail=\n'
+}
+
+# Report what UCI asks for, what really landed in the YAML, and the last
+# submission result. Used by the LuCI status panel (polled every 5s).
+cmd_status() {
+    enabled=$(uci_get enabled 0)
+    q=$(build_query)
+    managed=$(managed_keys)
+    target=$(uci_get apply_to all)
+
+    printf 'ok=1\n'
+    printf 'enabled=%s\n' "$enabled"
+    printf 'params=%s\n' "$q"
+    printf 'expected=example.com%s\n' "${q:+?$q}"
+
+    if pidof ddns-go >/dev/null 2>&1; then
+        printf 'service=running\n'
+    else
+        printf 'service=stopped\n'
+    fi
+
+    if [ ! -f "$CONF" ]; then
+        printf 'config=missing\nstate=missing\nin_sync=0\ndomain_count=0\n'
+    else
+        printf 'config=present\n'
+        collect_domains
+        if [ "$enabled" = "1" ]; then
+            expected=$(rewrite_yaml "$q" "$managed" "$target")
+            if printf '%s\n' "$expected" | cmp -s - "$CONF"; then
+                printf 'state=applied\nin_sync=1\n'
+            else
+                printf 'state=pending\nin_sync=0\n'
+            fi
+        else
+            printf 'state=disabled\nin_sync=1\n'
+        fi
+    fi
+
+    if [ -r "$LAST" ]; then
+        sed -n 's/^time=/last_apply=/p' "$LAST" | head -n 1
+        sed -n 's/^result=/last_apply_result=/p' "$LAST" | head -n 1
+    else
+        printf 'last_apply=\nlast_apply_result=\n'
+    fi
+
+    last_submit
+}
+
+cmd=$1
+case "$cmd" in
+    preview)
+        q=$(build_query)
+        managed=$(managed_keys)
+        ok "params=$q" "sample=example.com${q:+?$q}" "managed=$managed"
+        ;;
+
+    apply)
+        enabled=$(uci_get enabled 0)
+        if [ "$enabled" != "1" ]; then
+            ok 'changed=0' 'skipped=1' 'params='
+        fi
+        q=$(build_query)
+        if [ "$(uci_get line default)" = "custom" ] && [ -z "$(uci_get line_code '')" ]; then
+            fail 'Custom line selected but LineCode is empty'
+        fi
+        changed=$(inject_yaml "$q" "$(managed_keys)" "$(uci_get apply_to all)")
+        write_stamp ok "$q"
+        ok "changed=$changed" "params=$q"
+        ;;
+
+    clear)
+        # Disable UCI as well: start_instance() would otherwise re-inject the
+        # parameters on the next service restart.
+        uci_set enabled 0
+        uci_commit
+        changed=$(inject_yaml "" "$(managed_keys)" "all")
+        write_stamp cleared ''
+        ok "changed=$changed"
+        ;;
+
+    status)
+        cmd_status
+        ;;
+
+    create_line)
+        add_custom_line "$2" "$3" "$4"
+        ;;
+
+    *)
+        printf 'ok=0\nerror=Usage: ddns-go-alidns preview|apply|clear|status|create_line <DomainName> <LineName> <IpSegments>\n'
+        exit 1
+        ;;
+esac
