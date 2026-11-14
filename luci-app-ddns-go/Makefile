@@ -8,7 +8,8 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-ddns-go
 PKG_VERSION:=1.6.8
-PKG_RELEASE:=20261114
+# Bumped for the OpenWrt 25.12 / apk compatibility release.
+PKG_RELEASE:=20261115
 
 PKG_MAINTAINER:=sirpdboy  <herboy2008@gmail.com>
 PKG_CONFIG_DEPENDS:=

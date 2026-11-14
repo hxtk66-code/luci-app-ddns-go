@@ -1,12 +1,12 @@
-name: Build IPK Packages
+name: Build OpenWrt Packages
 
-# Only OpenWrt 24.10 (opkg / .ipk) is built here.
-# SNAPSHOT uses the apk format, so it is intentionally not part of this workflow.
-#
-# Releases are created automatically: every successful push build publishes /
-# refreshes the rolling "latest" Release. Pushing a v* tag publishes a separate
-# version Release. A single-architecture manual run never overwrites "latest"
-# unless "publish = always" is chosen explicitly.
+# Two SDKs, two package formats, one Release:
+#   * OpenWrt 24.10 (opkg) -> .ipk
+#   * OpenWrt 25.12 (apk)  -> .apk
+# Every successful push build refreshes the rolling "latest" Release with
+# both formats. Pushing a v* tag publishes a separate version Release.
+# A single-architecture manual run never overwrites "latest" unless
+# "publish = always" is chosen explicitly.
 #
 # Builds are x86_64-only by default. The full architecture matrix is still
 # available on demand by choosing "all" in a manual run.
@@ -30,6 +30,15 @@ on:
           - mips_24kc
           - mipsel_24kc
           - riscv64_riscv64
+      format:
+        description: 'Package format (both = ipk + apk)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - ipk
+          - apk
       publish:
         description: 'Publish a Release (auto = only full builds)'
         required: true
@@ -51,11 +60,10 @@ permissions:
 # Keep push and manual runs in separate groups so triggering a push build
 # cannot cancel an in-progress single-architecture trial run.
 concurrency:
-  group: build-ipk-${{ github.event_name }}-${{ github.ref }}-${{ inputs.arch || 'auto' }}
+  group: build-pkg-${{ github.event_name }}-${{ github.ref }}-${{ inputs.arch || 'auto' }}-${{ inputs.format || 'both' }}
   cancel-in-progress: true
 
 env:
-  SDK: openwrt-24.10
   FEEDNAME: packages_ci
   PACKAGES: luci-app-ddns-go
 
@@ -88,17 +96,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       arch-matrix: ${{ steps.matrix.outputs.arch-matrix }}
+      format-matrix: ${{ steps.matrix.outputs.format-matrix }}
     steps:
-      - name: Select architectures
+      - name: Select architectures and formats
         id: matrix
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
           SELECTED: ${{ inputs.arch || '' }}
+          FORMAT: ${{ inputs.format || '' }}
           # Pushes (and therefore automatic Releases) build x86_64 only.
           SINGLE_ARCHES: '["x86_64"]'
           # "all" in a manual run is the opt-in path for the full matrix.
           ALL_ARCHES: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic","arm_cortex-a7","arm_cortex-a9","mips_24kc","mipsel_24kc","riscv64_riscv64","x86_64"]'
+          ALL_FORMATS: '["ipk","apk"]'
         run: |
           if [ "$EVENT" = "workflow_dispatch" ] && [ "$SELECTED" = "all" ]; then
             echo "arch-matrix=$ALL_ARCHES" >> "$GITHUB_OUTPUT"
@@ -110,102 +121,130 @@ jobs:
             echo "arch-matrix=$SINGLE_ARCHES" >> "$GITHUB_OUTPUT"
             echo "Push: building x86_64 only (automatic Release)"
           fi
+          if [ "$EVENT" = "workflow_dispatch" ] && \
+             [ -n "$FORMAT" ] && [ "$FORMAT" != "both" ]; then
+            echo "format-matrix=[\"$FORMAT\"]" >> "$GITHUB_OUTPUT"
+            echo "Manual run: building only the $FORMAT format"
+          else
+            echo "format-matrix=$ALL_FORMATS" >> "$GITHUB_OUTPUT"
+            echo "Building both ipk (24.10) and apk (25.12)"
+          fi
 
   build:
-    name: ipk / ${{ matrix.arch }}
+    name: ${{ matrix.format }} / ${{ matrix.arch }}
     needs: [get-version, prepare]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         arch: ${{ fromJSON(needs.prepare.outputs.arch-matrix) }}
+        format: ${{ fromJSON(needs.prepare.outputs.format-matrix) }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Build with OpenWrt 24.10 SDK
+      # 24.10 uses the opkg/.ipk format. This fork pins golang 1.26 which
+      # ddns-go 6.17.1 needs (go.mod requires >= 1.25).
+      - name: Build with OpenWrt 24.10 SDK (ipk)
+        if: matrix.format == 'ipk'
         uses: sirpdboy/gh-action-sdk@go1.26
         env:
-          ARCH: ${{ matrix.arch }}-${{ env.SDK }}
+          ARCH: ${{ matrix.arch }}-openwrt-24.10
           FEEDNAME: ${{ env.FEEDNAME }}
           PACKAGES: ${{ env.PACKAGES }}
           NO_REFRESH_CHECK: 'true'
 
-      - name: Collect .ipk files and create tar.gz
+      # 25.12 switched to apk/.apk. Its own feeds already ship golang1.26,
+      # so the upstream action is used with no third-party golang overrides.
+      - name: Build with OpenWrt 25.12 SDK (apk)
+        if: matrix.format == 'apk'
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-openwrt-25.12
+          FEEDNAME: ${{ env.FEEDNAME }}
+          PACKAGES: ${{ env.PACKAGES }}
+          NO_REFRESH_CHECK: 'true'
+
+      - name: Collect packages and create tar.gz
         id: pack
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
-          SDK: ${{ env.SDK }}
+          EXT: ${{ matrix.format }}
+          SDK: ${{ matrix.format == 'ipk' && 'openwrt-24.10' || 'openwrt-25.12' }}
         run: |
           set -euo pipefail
 
           echo "=== Files produced by the SDK ==="
           find bin/packages -type f -print | sort || true
 
-          mkdir -p ipk-out
+          mkdir -p pkg-out
           # Prefer this architecture's own directory so packages built for a
           # different target can never leak into this archive. The riscv64 SDK
           # writes to riscv64_generic instead of riscv64_riscv64, so fall back
-          # to the whole tree only when the expected directory has no .ipk.
+          # to the whole tree only when the expected directory has no package.
           PKG_ROOT="bin/packages/$ARCH"
           if [ ! -d "$PKG_ROOT" ] || \
-             ! find "$PKG_ROOT" -type f -name '*ddns-go*.ipk' -print -quit | grep -q .; then
-            echo "::warning::$PKG_ROOT has no .ipk, falling back to bin/packages"
+             ! find "$PKG_ROOT" -type f -name "*ddns-go*.$EXT" -print -quit | grep -q .; then
+            echo "::warning::$PKG_ROOT has no .$EXT, falling back to bin/packages"
             PKG_ROOT="bin/packages"
           fi
           echo "Collecting from: $PKG_ROOT"
 
-          # Only this project's .ipk packages are kept.
+          # Only this project's packages, and only this format.
           while IFS= read -r -d '' f; do
-            cp -f "$f" ipk-out/
-          done < <(find "$PKG_ROOT" -type f -name '*ddns-go*.ipk' -print0)
+            cp -f "$f" pkg-out/
+          done < <(find "$PKG_ROOT" -type f -name "*ddns-go*.$EXT" -print0)
 
-          # Hard guarantee: the archive can only ever contain .ipk files.
-          find ipk-out -type f ! -name '*.ipk' -delete
+          # Hard guarantee: the archive can only ever contain one format.
+          find pkg-out -type f ! -name "*.$EXT" -delete
 
-          COUNT=$(find ipk-out -maxdepth 1 -type f -name '*.ipk' | wc -l)
+          COUNT=$(find pkg-out -maxdepth 1 -type f -name "*.$EXT" | wc -l)
           if [ "$COUNT" -lt 1 ]; then
-            echo "::error::No .ipk files were produced for $ARCH"
+            echo "::error::No .$EXT packages were produced for $ARCH"
             exit 1
           fi
 
-          APK_COUNT=$(find bin/packages -type f -name '*.apk' | wc -l)
-          echo "APK files produced by SDK (intentionally discarded): $APK_COUNT"
-          echo "=== Collected .ipk files ($COUNT) ==="
-          ls -lh ipk-out
-          sha256sum ipk-out/*.ipk
+          if [ "$EXT" = "apk" ]; then
+            OTHER_EXT=ipk
+          else
+            OTHER_EXT=apk
+          fi
+          echo "Other-format packages produced by SDK (intentionally discarded): $(find bin/packages -type f -name "*.$OTHER_EXT" | wc -l)"
+          echo "=== Collected .$EXT packages ($COUNT) ==="
+          ls -lh pkg-out
+          sha256sum pkg-out/*."$EXT"
 
           ARCHIVE="${SDK}-${ARCH}.tar.gz"
-          tar -zcvf "$ARCHIVE" -C ipk-out .
+          tar -zcvf "$ARCHIVE" -C pkg-out .
           echo "=== Archive contents ==="
           tar -tzf "$ARCHIVE"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-      - name: Upload .ipk files
+      - name: Upload standalone packages
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ env.SDK }}-${{ matrix.arch }}
-          path: ipk-out/*.ipk
+          name: pkg-${{ matrix.format }}-${{ matrix.arch }}
+          path: pkg-out/*.${{ matrix.format }}
           if-no-files-found: error
           retention-days: 30
 
       - name: Upload release archive
         uses: actions/upload-artifact@v4
         with:
-          name: archive-${{ env.SDK }}-${{ matrix.arch }}
+          name: archive-${{ matrix.format }}-${{ matrix.arch }}
           path: ${{ steps.pack.outputs.archive }}
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: Publish Release
-    needs: [get-version, build]
-    # A single upload job avoids the previous race where every matrix job
-    # replaced the release assets of all the others.
+    needs: [get-version, prepare, build]
+    # A single upload job avoids the race where every matrix job replaces
+    # the release assets of all the others.
     # Push builds (x86_64 only) publish automatically. A manual single-arch
     # trial never overwrites "latest" unless publish=always was chosen.
     if: >-
@@ -232,23 +271,25 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           SELECTED: ${{ inputs.arch || '' }}
           PUBLISH: ${{ inputs.publish || '' }}
+          FORMAT: ${{ inputs.format || 'both' }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = "push" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="$REF_NAME"
-            NAME="OpenWrt IPK Packages $REF_NAME"
+            NAME="OpenWrt Packages $REF_NAME"
             PRERELEASE=false
             LABEL="Version release"
           elif [ "$EVENT" = "workflow_dispatch" ] && [ "$PUBLISH" = "always" ] \
                && [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
-            # Keep a forced single-architecture release away from "latest".
-            TAG="latest-$SELECTED"
-            NAME="OpenWrt IPK Packages ($SELECTED trial build)"
+            # Keep a forced single-architecture / single-format release away
+            # from "latest" so it cannot strip the other format's assets.
+            TAG="latest-${SELECTED}-${FORMAT}"
+            NAME="OpenWrt Packages ($SELECTED / $FORMAT trial build)"
             PRERELEASE=true
             LABEL="Single-architecture trial"
           else
             TAG="latest"
-            NAME="OpenWrt IPK Packages (latest build)"
+            NAME="OpenWrt Packages (latest build)"
             PRERELEASE=false
             LABEL="Rolling automatic build"
           fi
@@ -265,16 +306,18 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Download all standalone .ipk files
+      - name: Download all standalone packages
         uses: actions/download-artifact@v4
         with:
-          pattern: ipk-*
-          path: ipk-dist
+          pattern: pkg-*
+          path: pkg-dist
           merge-multiple: true
 
       - name: Verify release payload
         id: verify
         shell: bash
+        env:
+          FORMAT_MATRIX: ${{ needs.prepare.outputs.format-matrix }}
         run: |
           set -euo pipefail
           # Keep the two download steps in separate directories so neither can
@@ -282,33 +325,61 @@ jobs:
           # release asset name with "."; normalise it ourselves so that
           # replacesArtifacts can match and replace an existing asset instead
           # of hitting a name conflict (the i18n package version contains "~").
-          for f in ipk-dist/*.ipk; do
-            base=${f##*/}
-            cp -f "$f" "dist/$(printf '%s' "$base" | tr '~' '.')"
+          mkdir -p dist pkg-dist
+          for f in pkg-dist/*; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.ipk|*.apk)
+                base=${f##*/}
+                cp -f "$f" "dist/$(printf '%s' "$base" | tr '~' '.')"
+                ;;
+              *)
+                echo "::error::Unexpected package file: $f"
+                exit 1
+                ;;
+            esac
           done
           ARCHIVES=$(find dist -type f -name '*.tar.gz' | wc -l)
           IPKS=$(find dist -type f -name '*.ipk' | wc -l)
-          OTHERS=$(find dist -type f ! -name '*.tar.gz' ! -name '*.ipk' | wc -l)
-          echo "tar.gz archives: $ARCHIVES, standalone .ipk files: $IPKS, other files: $OTHERS"
+          APKS=$(find dist -type f -name '*.apk' | wc -l)
+          OTHERS=$(find dist -type f ! -name '*.tar.gz' ! -name '*.ipk' ! -name '*.apk' | wc -l)
+          echo "tar.gz archives: $ARCHIVES, standalone .ipk: $IPKS, standalone .apk: $APKS, other files: $OTHERS"
           test "$ARCHIVES" -gt 0
-          test "$IPKS" -gt 0
           test "$OTHERS" -eq 0
+          case "$FORMAT_MATRIX" in
+            *ipk*) test "$IPKS" -gt 0 || { echo "::error::Missing .ipk packages"; exit 1; } ;;
+            *)     test "$IPKS" -eq 0 || { echo "::error::Unexpected .ipk packages"; exit 1; } ;;
+          esac
+          case "$FORMAT_MATRIX" in
+            *apk*) test "$APKS" -gt 0 || { echo "::error::Missing .apk packages"; exit 1; } ;;
+            *)     test "$APKS" -eq 0 || { echo "::error::Unexpected .apk packages"; exit 1; } ;;
+          esac
           echo "archive_count=$ARCHIVES" >> "$GITHUB_OUTPUT"
           echo "ipk_count=$IPKS" >> "$GITHUB_OUTPUT"
+          echo "apk_count=$APKS" >> "$GITHUB_OUTPUT"
           for f in dist/*.tar.gz; do
-            echo "--- $f"
+            case "$f" in
+              *openwrt-24.10*) EXT=ipk ;;
+              *openwrt-25.12*) EXT=apk ;;
+              *)
+                echo "::error::Cannot determine SDK for archive $f"
+                exit 1
+                ;;
+            esac
+            echo "--- $f (expects .$EXT only)"
             tar -tzf "$f"
-            # The archive is created with "tar -C ipk-out .", so it always has
+            # The archive is created with "tar -C pkg-out .", so it always has
             # a bare "." directory entry. Ignore directory entries ("./", "x/")
-            # and empty lines; everything else must be an .ipk file.
-            BAD=$(tar -tzf "$f" | grep -vE '\.ipk$|/+$|^(\.|\./)?$' || true)
+            # and empty lines; everything else must be a package of $EXT.
+            PATTERN='\.'"$EXT"'$|/+$|^(\.|\./)?$'
+            BAD=$(tar -tzf "$f" | grep -vE "$PATTERN" || true)
             if [ -n "$BAD" ]; then
-              echo "::error::$f contains non-ipk files: $BAD"
+              echo "::error::$f contains unexpected files: $BAD"
               exit 1
             fi
           done
-          echo "=== Standalone .ipk files ==="
-          ls -lh dist/*.ipk
+          echo "=== Standalone packages ==="
+          ls -lh dist/*.ipk dist/*.apk 2>/dev/null || true
 
       - name: Generate release notes
         id: release_notes
@@ -318,17 +389,19 @@ jobs:
           LABEL: ${{ steps.meta.outputs.label }}
           ARCHIVE_COUNT: ${{ steps.verify.outputs.archive_count }}
           IPK_COUNT: ${{ steps.verify.outputs.ipk_count }}
+          APK_COUNT: ${{ steps.verify.outputs.apk_count }}
         run: |
           set -euo pipefail
           BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')
           {
-            echo "# OpenWrt IPK Packages $VERSION"
+            echo "# OpenWrt Packages $VERSION"
             echo
-            echo "> $LABEL - generated automatically by the Build IPK Packages workflow."
-            echo "> Commit \`$GITHUB_SHA\` | run #$GITHUB_RUN_NUMBER | $BUILD_TIME | $ARCHIVE_COUNT architecture archives."
+            echo "> $LABEL - generated automatically by the Build OpenWrt Packages workflow."
+            echo "> Commit \`$GITHUB_SHA\` | run #$GITHUB_RUN_NUMBER | $BUILD_TIME | $ARCHIVE_COUNT archives."
             echo
-            echo "- SDK: OpenWrt 24.10 (opkg / \`.ipk\` only)"
-            echo "- Every archive contains \`.ipk\` files only: no \`.apk\`, no firmware images."
+            echo "- OpenWrt 24.10 SDK: opkg / \`.ipk\` packages"
+            echo "- OpenWrt 25.12 SDK: apk / \`.apk\` packages"
+            echo "- Each archive contains one format only; no firmware images, no mixed packages."
             echo
             echo "## Package Overview"
             echo
@@ -341,17 +414,30 @@ jobs:
               echo "| \`$name\` | \`$ver-$rel\` |"
             done
             echo
-            echo "## Archives (one per architecture)"
+            echo "## Archives (one per SDK and architecture)"
             echo
-            for f in dist/*.tar.gz; do
-              echo "- \`$(basename "$f")\`"
+            find dist -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' | sort | while read -r f; do
+              echo "- \`$f\`"
             done
             echo
-            echo "## Standalone .ipk packages ($IPK_COUNT)"
+            echo "## Standalone .ipk packages ($IPK_COUNT) - OpenWrt 24.10"
             echo
-            for f in dist/*.ipk; do
-              echo "- \`$(basename "$f")\`"
+            find dist -maxdepth 1 -type f -name '*.ipk' -printf '%f\n' | sort | while read -r f; do
+              echo "- \`$f\`"
             done
+            echo
+            echo "## Standalone .apk packages ($APK_COUNT) - OpenWrt 25.12"
+            echo
+            find dist -maxdepth 1 -type f -name '*.apk' -printf '%f\n' | sort | while read -r f; do
+              echo "- \`$f\`"
+            done
+            echo
+            echo "## Installation"
+            echo
+            echo "- OpenWrt 24.10 (opkg): \`opkg install ./*.ipk\`"
+            echo "- OpenWrt 25.12 (apk): \`apk add --allow-untrusted ./*.apk\`"
+            echo "- Install all three packages of one format; never mix \`.ipk\` and \`.apk\` on the same system."
+            echo "- \`ddns-go\` needs \`ca-bundle\`; the LuCI app also needs \`curl\` and \`openssl-util\`."
             echo
             echo "## Changelog"
             echo
@@ -364,11 +450,6 @@ jobs:
               git log --pretty=format:'- %s (%h)' -10 || true
             fi
             echo
-            echo
-            echo "## Notes"
-            echo
-            echo "- Pick the archive matching your router's architecture."
-            echo "- Install with \`opkg install *.ipk\` (OpenWrt 24.10)."
             echo
             echo "## Credits"
             echo
@@ -383,7 +464,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           cat release-notes.md
 
-      - name: Upload archives and .ipk files to Release
+      - name: Upload archives and standalone packages to Release
         uses: ncipollo/release-action@v1
         with:
           name: ${{ steps.meta.outputs.name }}
@@ -395,7 +476,7 @@ jobs:
           allowUpdates: true
           replacesArtifacts: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
-          # Both the per-architecture tar.gz archives AND the bare .ipk files
-          # must be downloadable directly from the Releases page.
-          artifacts: "dist/*.tar.gz,dist/*.ipk"
+          # The tar.gz archives AND the bare packages of both formats must be
+          # downloadable directly from the Releases page.
+          artifacts: "dist/*.tar.gz,dist/*.ipk,dist/*.apk"
           body: ${{ steps.release_notes.outputs.notes }}

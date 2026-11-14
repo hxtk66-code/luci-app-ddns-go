@@ -13,8 +13,14 @@ commit ddns-go
 EOF
 fi
 
+# Both the 24.10 (opkg/.ipk) and 25.12 (apk/.apk) builds ship the same
+# helpers. The web server group is normally www-data; fall back to root on
+# systems that do not define it so this uci-defaults script always exits 0
+# (a non-zero exit would make the package manager re-run it on every boot).
+WWW_GROUP=www-data
+grep -q "^${WWW_GROUP}:" /etc/group 2>/dev/null || WWW_GROUP=root
 chmod +x /usr/share/rpcd/ucode/luci.ddns-go
-chown root:www-data /usr/libexec/ddns-go-call
+chown "root:$WWW_GROUP" /usr/libexec/ddns-go-call
 chmod 750 /usr/libexec/ddns-go-call
 chown root:root /usr/libexec/ddns-go-alidns
 chmod 750 /usr/libexec/ddns-go-alidns

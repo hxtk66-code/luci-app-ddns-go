@@ -45,7 +45,7 @@ Please read this page carefully, which includes precautions and instructions on 
 
 ## 2025.5.12  luci-app-ddns-go 1.5.1
 - Update log:
-- Compatible with the latest OPENWRT24.10, JS version. The old version 18.06 uses LUA branch.
+- Compatible with OpenWrt 24.10 (opkg) and 25.12 (apk), JS version. The old version 18.06 uses LUA branch.
 
 
 ## characteristic
@@ -62,6 +62,26 @@ Please read this page carefully, which includes precautions and instructions on 
 - Support webhook notifications
 - Supports TTL
 - Support some DNS service providers to pass custom parameters and achieve functions such as region resolution
+
+## Prebuilt packages
+
+The [Releases](https://github.com/hxtk66-code/luci-app-ddns-go/releases) page builds the same
+source twice, once per package format:
+
+| OpenWrt release | Package manager | Files | Install command |
+|-----------------|----------------|-------|-----------------|
+| 24.10 | `opkg` | `*.ipk` | `opkg install ./*.ipk` |
+| 25.12 (and newer) | `apk` | `*.apk` | `apk add --allow-untrusted ./*.apk` |
+
+Each format ships three packages:
+
+- `ddns-go` - the daemon binary, init script and UCI config (architecture specific, e.g. `x86_64`).
+- `luci-app-ddns-go` - the LuCI pages and the AliDNS custom-line helper.
+- `luci-i18n-ddns-go-zh-cn` - optional Simplified Chinese translation.
+
+Install all three packages of **one** format; never mix `.ipk` and `.apk` on the same system.
+`ddns-go` depends on `ca-bundle`, and the LuCI app additionally needs `curl` and `openssl-util`.
+The local `.apk` packages are not signed by a repository key, hence `--allow-untrusted`.
 
 ## Usage
 

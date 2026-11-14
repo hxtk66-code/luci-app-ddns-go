@@ -44,7 +44,7 @@
 ## 2025.5.14  luci-app-ddns-go 1.5.2
 ## 2025.5.12  luci-app-ddns-go 1.5.1
 - 更新日志：
-- 适配最新OPENWRT24.10，JS版本。老版18.06用LUA分支。
+- 适配 OpenWrt 24.10（opkg）与 25.12（apk），JS 版本。老版 18.06 用 LUA 分支。
 
 
 ## 特性
@@ -61,6 +61,25 @@
 - 支持webhook通知
 - 支持TTL
 - 支持部分dns服务商传递自定义参数，实现地域解析等功能
+
+## 预编译安装包
+
+[Releases](https://github.com/hxtk66-code/luci-app-ddns-go/releases) 页会用同一份源码产出两种格式：
+
+| OpenWrt 版本 | 包管理器 | 文件 | 安装命令 |
+|--------------|----------|------|----------|
+| 24.10 | `opkg` | `*.ipk` | `opkg install ./*.ipk` |
+| 25.12 及更新版本 | `apk` | `*.apk` | `apk add --allow-untrusted ./*.apk` |
+
+每种格式都是三个包：
+
+- `ddns-go`：主程序二进制、init 脚本与 UCI 配置（区分架构，例如 `x86_64`）。
+- `luci-app-ddns-go`：LuCI 页面与阿里云自定义线路 helper。
+- `luci-i18n-ddns-go-zh-cn`：可选的简体中文语言包。
+
+请安装**同一种格式**的三个包，不要在同一系统里混装 `.ipk` 和 `.apk`。
+`ddns-go` 依赖 `ca-bundle`，LuCI 界面包还依赖 `curl`、`openssl-util`。
+本地 `.apk` 未用软件源密钥签名，所以需要 `--allow-untrusted`。
 
 ## 使用方法
 
