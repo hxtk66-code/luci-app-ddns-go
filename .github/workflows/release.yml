@@ -3,17 +3,20 @@ name: Build IPK Packages
 # Only OpenWrt 24.10 (opkg / .ipk) is built here.
 # SNAPSHOT uses the apk format, so it is intentionally not part of this workflow.
 #
-# Releases are created automatically: every successful full build publishes /
+# Releases are created automatically: every successful push build publishes /
 # refreshes the rolling "latest" Release. Pushing a v* tag publishes a separate
 # version Release. A single-architecture manual run never overwrites "latest"
 # unless "publish = always" is chosen explicitly.
+#
+# Builds are x86_64-only by default. The full architecture matrix is still
+# available on demand by choosing "all" in a manual run.
 on:
   workflow_dispatch:
     inputs:
       arch:
         description: 'Architecture to build (all = every architecture)'
         required: true
-        default: 'all'
+        default: 'x86_64'
         type: choice
         options:
           - all
@@ -92,14 +95,20 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           SELECTED: ${{ inputs.arch || '' }}
-          DEFAULT_ARCHES: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic","arm_cortex-a7","arm_cortex-a9","mips_24kc","mipsel_24kc","riscv64_riscv64","x86_64"]'
+          # Pushes (and therefore automatic Releases) build x86_64 only.
+          SINGLE_ARCHES: '["x86_64"]'
+          # "all" in a manual run is the opt-in path for the full matrix.
+          ALL_ARCHES: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic","arm_cortex-a7","arm_cortex-a9","mips_24kc","mipsel_24kc","riscv64_riscv64","x86_64"]'
         run: |
-          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$SELECTED" = "all" ]; then
+            echo "arch-matrix=$ALL_ARCHES" >> "$GITHUB_OUTPUT"
+            echo "Manual run: building all architectures"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$SELECTED" ]; then
             echo "arch-matrix=[\"$SELECTED\"]" >> "$GITHUB_OUTPUT"
             echo "Manual run: building only $SELECTED"
           else
-            echo "arch-matrix=$DEFAULT_ARCHES" >> "$GITHUB_OUTPUT"
-            echo "Building all architectures"
+            echo "arch-matrix=$SINGLE_ARCHES" >> "$GITHUB_OUTPUT"
+            echo "Push: building x86_64 only (automatic Release)"
           fi
 
   build:
@@ -197,8 +206,8 @@ jobs:
     needs: [get-version, build]
     # A single upload job avoids the previous race where every matrix job
     # replaced the release assets of all the others.
-    # Full builds publish automatically. A single-architecture trial run never
-    # overwrites the rolling "latest" Release unless publish=always was chosen.
+    # Push builds (x86_64 only) publish automatically. A manual single-arch
+    # trial never overwrites "latest" unless publish=always was chosen.
     if: >-
       ${{
         always() &&
