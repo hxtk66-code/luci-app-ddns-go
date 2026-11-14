@@ -4,6 +4,24 @@ name: Build IPK Packages
 # SNAPSHOT uses the apk format, so it is intentionally not part of this workflow.
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Architecture to build (all = every architecture)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - x86_64
+          - aarch64_cortex-a53
+          - aarch64_cortex-a72
+          - aarch64_cortex-a76
+          - aarch64_generic
+          - arm_cortex-a7
+          - arm_cortex-a9
+          - mips_24kc
+          - mipsel_24kc
+          - riscv64_riscv64
   push:
     branches:
       - main
@@ -44,24 +62,35 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
 
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      arch-matrix: ${{ steps.matrix.outputs.arch-matrix }}
+    steps:
+      - name: Select architectures
+        id: matrix
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          SELECTED: ${{ inputs.arch || '' }}
+          DEFAULT_ARCHES: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic","arm_cortex-a7","arm_cortex-a9","mips_24kc","mipsel_24kc","riscv64_riscv64","x86_64"]'
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+            echo "arch-matrix=[\"$SELECTED\"]" >> "$GITHUB_OUTPUT"
+            echo "Manual run: building only $SELECTED"
+          else
+            echo "arch-matrix=$DEFAULT_ARCHES" >> "$GITHUB_OUTPUT"
+            echo "Building all architectures"
+          fi
+
   build:
     name: ipk / ${{ matrix.arch }}
-    needs: get-version
+    needs: [get-version, prepare]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - aarch64_cortex-a53
-          - aarch64_cortex-a72
-          - aarch64_cortex-a76
-          - aarch64_generic
-          - arm_cortex-a7
-          - arm_cortex-a9
-          - mips_24kc
-          - mipsel_24kc
-          - riscv64_riscv64
-          - x86_64
+        arch: ${{ fromJSON(needs.prepare.outputs.arch-matrix) }}
 
     steps:
       - uses: actions/checkout@v4
