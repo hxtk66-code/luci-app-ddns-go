@@ -474,6 +474,11 @@ jobs:
           commit: ${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
+          # replacesArtifacts only overwrites assets with the SAME file name.
+          # A version bump changes the ipk/apk file names, so stale packages
+          # from a previous release would otherwise linger on the Release.
+          # removeArtifacts clears the old asset list first.
+          removeArtifacts: true
           replacesArtifacts: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
           # The tar.gz archives AND the bare packages of both formats must be
