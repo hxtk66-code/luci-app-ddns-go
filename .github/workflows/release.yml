@@ -269,7 +269,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: ipk-*
-          path: dist
+          path: ipk-dist
           merge-multiple: true
 
       - name: Verify release payload
@@ -277,6 +277,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Keep the two download steps in separate directories so neither can
+          # clear the files produced by the other.
+          cp -f ipk-dist/*.ipk dist/
           ARCHIVES=$(find dist -type f -name '*.tar.gz' | wc -l)
           IPKS=$(find dist -type f -name '*.ipk' | wc -l)
           OTHERS=$(find dist -type f ! -name '*.tar.gz' ! -name '*.ipk' | wc -l)
