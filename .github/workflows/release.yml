@@ -211,7 +211,7 @@ jobs:
     if: >-
       ${{
         always() &&
-        needs.build.result != 'cancelled' &&
+        needs.build.result == 'success' &&
         inputs.publish != 'never' &&
         (github.event_name != 'workflow_dispatch' ||
          inputs.publish == 'always' ||
@@ -265,17 +265,27 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download all standalone .ipk files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ipk-*
+          path: dist
+          merge-multiple: true
+
       - name: Verify release payload
         id: verify
         shell: bash
         run: |
           set -euo pipefail
           ARCHIVES=$(find dist -type f -name '*.tar.gz' | wc -l)
-          OTHERS=$(find dist -type f ! -name '*.tar.gz' | wc -l)
-          echo "tar.gz archives: $ARCHIVES, other files: $OTHERS"
+          IPKS=$(find dist -type f -name '*.ipk' | wc -l)
+          OTHERS=$(find dist -type f ! -name '*.tar.gz' ! -name '*.ipk' | wc -l)
+          echo "tar.gz archives: $ARCHIVES, standalone .ipk files: $IPKS, other files: $OTHERS"
           test "$ARCHIVES" -gt 0
+          test "$IPKS" -gt 0
           test "$OTHERS" -eq 0
           echo "archive_count=$ARCHIVES" >> "$GITHUB_OUTPUT"
+          echo "ipk_count=$IPKS" >> "$GITHUB_OUTPUT"
           for f in dist/*.tar.gz; do
             echo "--- $f"
             tar -tzf "$f"
@@ -288,6 +298,8 @@ jobs:
               exit 1
             fi
           done
+          echo "=== Standalone .ipk files ==="
+          ls -lh dist/*.ipk
 
       - name: Generate release notes
         id: release_notes
@@ -296,6 +308,7 @@ jobs:
           VERSION: ${{ needs.get-version.outputs.version }}
           LABEL: ${{ steps.meta.outputs.label }}
           ARCHIVE_COUNT: ${{ steps.verify.outputs.archive_count }}
+          IPK_COUNT: ${{ steps.verify.outputs.ipk_count }}
         run: |
           set -euo pipefail
           BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')
@@ -322,6 +335,12 @@ jobs:
             echo "## Archives (one per architecture)"
             echo
             for f in dist/*.tar.gz; do
+              echo "- \`$(basename "$f")\`"
+            done
+            echo
+            echo "## Standalone .ipk packages ($IPK_COUNT)"
+            echo
+            for f in dist/*.ipk; do
               echo "- \`$(basename "$f")\`"
             done
             echo
@@ -355,7 +374,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           cat release-notes.md
 
-      - name: Upload archives to Release
+      - name: Upload archives and .ipk files to Release
         uses: ncipollo/release-action@v1
         with:
           name: ${{ steps.meta.outputs.name }}
@@ -367,5 +386,7 @@ jobs:
           allowUpdates: true
           replacesArtifacts: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
-          artifacts: "dist/*.tar.gz"
+          # Both the per-architecture tar.gz archives AND the bare .ipk files
+          # must be downloadable directly from the Releases page.
+          artifacts: "dist/*.tar.gz,dist/*.ipk"
           body: ${{ steps.release_notes.outputs.notes }}
