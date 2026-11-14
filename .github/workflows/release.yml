@@ -2,6 +2,11 @@ name: Build IPK Packages
 
 # Only OpenWrt 24.10 (opkg / .ipk) is built here.
 # SNAPSHOT uses the apk format, so it is intentionally not part of this workflow.
+#
+# Releases are created automatically: every successful full build publishes /
+# refreshes the rolling "latest" Release. Pushing a v* tag publishes a separate
+# version Release. A single-architecture manual run never overwrites "latest"
+# unless "publish = always" is chosen explicitly.
 on:
   workflow_dispatch:
     inputs:
@@ -22,6 +27,15 @@ on:
           - mips_24kc
           - mipsel_24kc
           - riscv64_riscv64
+      publish:
+        description: 'Publish a Release (auto = only full builds)'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - always
+          - never
   push:
     branches:
       - main
@@ -31,8 +45,10 @@ on:
 permissions:
   contents: write
 
+# Keep push and manual runs in separate groups so triggering a push build
+# cannot cancel an in-progress single-architecture trial run.
 concurrency:
-  group: build-ipk-${{ github.ref }}
+  group: build-ipk-${{ github.event_name }}-${{ github.ref }}-${{ inputs.arch || 'auto' }}
   cancel-in-progress: true
 
 env:
@@ -57,7 +73,10 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
           else
-            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+            # Only real v* version tags count. The automatically created
+            # "latest" / "latest-<arch>" rolling tags must not become versions.
+            VERSION=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null \
+                      || echo "dev-${GITHUB_SHA::7}")
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version: $VERSION"
@@ -178,12 +197,57 @@ jobs:
     needs: [get-version, build]
     # A single upload job avoids the previous race where every matrix job
     # replaced the release assets of all the others.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    # Full builds publish automatically. A single-architecture trial run never
+    # overwrites the rolling "latest" Release unless publish=always was chosen.
+    if: >-
+      ${{
+        always() &&
+        needs.build.result != 'cancelled' &&
+        inputs.publish != 'never' &&
+        (github.event_name != 'workflow_dispatch' ||
+         inputs.publish == 'always' ||
+         inputs.arch == 'all' ||
+         inputs.arch == '')
+      }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Determine release target
+        id: meta
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          SELECTED: ${{ inputs.arch || '' }}
+          PUBLISH: ${{ inputs.publish || '' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "push" ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$REF_NAME"
+            NAME="OpenWrt IPK Packages $REF_NAME"
+            PRERELEASE=false
+            LABEL="Version release"
+          elif [ "$EVENT" = "workflow_dispatch" ] && [ "$PUBLISH" = "always" ] \
+               && [ -n "$SELECTED" ] && [ "$SELECTED" != "all" ]; then
+            # Keep a forced single-architecture release away from "latest".
+            TAG="latest-$SELECTED"
+            NAME="OpenWrt IPK Packages ($SELECTED trial build)"
+            PRERELEASE=true
+            LABEL="Single-architecture trial"
+          else
+            TAG="latest"
+            NAME="OpenWrt IPK Packages (latest build)"
+            PRERELEASE=false
+            LABEL="Rolling automatic build"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "Release target: tag=$TAG, name=$NAME, prerelease=$PRERELEASE"
 
       - name: Download all release archives
         uses: actions/download-artifact@v4
@@ -193,6 +257,7 @@ jobs:
           merge-multiple: true
 
       - name: Verify release payload
+        id: verify
         shell: bash
         run: |
           set -euo pipefail
@@ -201,10 +266,14 @@ jobs:
           echo "tar.gz archives: $ARCHIVES, other files: $OTHERS"
           test "$ARCHIVES" -gt 0
           test "$OTHERS" -eq 0
+          echo "archive_count=$ARCHIVES" >> "$GITHUB_OUTPUT"
           for f in dist/*.tar.gz; do
             echo "--- $f"
             tar -tzf "$f"
-            BAD=$(tar -tzf "$f" | grep -v '/$' | grep -v '\.ipk$' || true)
+            # The archive is created with "tar -C ipk-out .", so it always has
+            # a bare "." directory entry. Ignore directory entries ("./", "x/")
+            # and empty lines; everything else must be an .ipk file.
+            BAD=$(tar -tzf "$f" | grep -vE '\.ipk$|/+$|^(\.|\./)?$' || true)
             if [ -n "$BAD" ]; then
               echo "::error::$f contains non-ipk files: $BAD"
               exit 1
@@ -216,10 +285,16 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.get-version.outputs.version }}
+          LABEL: ${{ steps.meta.outputs.label }}
+          ARCHIVE_COUNT: ${{ steps.verify.outputs.archive_count }}
         run: |
           set -euo pipefail
+          BUILD_TIME=$(date -u +'%Y-%m-%d %H:%M UTC')
           {
             echo "# OpenWrt IPK Packages $VERSION"
+            echo
+            echo "> $LABEL - generated automatically by the Build IPK Packages workflow."
+            echo "> Commit \`$GITHUB_SHA\` | run #$GITHUB_RUN_NUMBER | $BUILD_TIME | $ARCHIVE_COUNT architecture archives."
             echo
             echo "- SDK: OpenWrt 24.10 (opkg / \`.ipk\` only)"
             echo "- Every archive contains \`.ipk\` files only: no \`.apk\`, no firmware images."
@@ -243,7 +318,7 @@ jobs:
             echo
             echo "## Changelog"
             echo
-            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
+            PREV_TAG=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
             if [ -n "$PREV_TAG" ]; then
               echo "Changes since $PREV_TAG:"
               echo
@@ -274,11 +349,14 @@ jobs:
       - name: Upload archives to Release
         uses: ncipollo/release-action@v1
         with:
-          name: OpenWrt IPK Packages ${{ needs.get-version.outputs.version }}
-          tag: ${{ github.ref_name }}
+          name: ${{ steps.meta.outputs.name }}
+          tag: ${{ steps.meta.outputs.tag }}
+          # The action creates the tag when it is missing, but needs an
+          # explicit commit reference in that case ("latest" is auto-created).
+          commit: ${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          prerelease: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           artifacts: "dist/*.tar.gz"
           body: ${{ steps.release_notes.outputs.notes }}
