@@ -278,8 +278,14 @@ jobs:
         run: |
           set -euo pipefail
           # Keep the two download steps in separate directories so neither can
-          # clear the files produced by the other.
-          cp -f ipk-dist/*.ipk dist/
+          # clear the files produced by the other. GitHub replaces "~" in a
+          # release asset name with "."; normalise it ourselves so that
+          # replacesArtifacts can match and replace an existing asset instead
+          # of hitting a name conflict (the i18n package version contains "~").
+          for f in ipk-dist/*.ipk; do
+            base=${f##*/}
+            cp -f "$f" "dist/$(printf '%s' "$base" | tr '~' '.')"
+          done
           ARCHIVES=$(find dist -type f -name '*.tar.gz' | wc -l)
           IPKS=$(find dist -type f -name '*.ipk' | wc -l)
           OTHERS=$(find dist -type f ! -name '*.tar.gz' ! -name '*.ipk' | wc -l)
